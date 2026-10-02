@@ -38,8 +38,10 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		out.MaxTokens = *req.MaxOutputTokens
 	}
 	if out.MaxTokens == 0 {
-		// Anthropic requires max_tokens; default to a sensible value.
-		out.MaxTokens = 128000
+		// Anthropic requires max_tokens. Keep the default at the current
+		// Claude coding-model ceiling so Codex requests without an explicit
+		// output budget are not silently truncated at the historical 8192.
+		out.MaxTokens = defaultAnthropicMaxTokens
 	}
 
 	// Convert tools
@@ -178,6 +180,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	}
 
 	var messages []AnthropicMessage
+	compactionTrigger := false
 
 	for _, item := range items {
 		switch {
@@ -240,6 +243,24 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 				}
 				messages = append(messages, AnthropicMessage{Role: "assistant", Content: content})
 			}
+
+		case item.Type == "compaction" || item.Type == "compaction_summary":
+			summary := responsesCompactionSummary(item)
+			if plaintext, ok := decodePlaintextCompactionSummary(item.EncryptedContent); ok && plaintext != "" {
+				summary = plaintext
+			}
+			if summary != "" {
+				messages = append(messages, AnthropicMessage{
+					Role: "user",
+					Content: json.RawMessage(mustMarshalAnthropicContent([]AnthropicContentBlock{{
+						Type: "text",
+						Text: "<conversation_summary>\n" + summary + "\n</conversation_summary>",
+					}})),
+				})
+			}
+
+		case item.Type == "compaction_trigger":
+			compactionTrigger = true
 
 		case item.Role == "user":
 			content, err := convertResponsesUserToAnthropicContent(item.Content)
@@ -304,12 +325,47 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	messages = mergeConsecutiveMessages(messages)
 	messages = dropTrailingAnthropicThinkingBlocks(messages)
 
+	if compactionTrigger {
+		messages = append(messages, AnthropicMessage{
+			Role: "user",
+			Content: json.RawMessage(mustMarshalAnthropicContent([]AnthropicContentBlock{{
+				Type: "text",
+				Text: codexCompactionSummaryPrompt,
+			}})),
+		})
+	}
+
 	var system json.RawMessage
 	if len(systemParts) > 0 {
 		system, _ = json.Marshal(strings.Join(systemParts, "\n\n"))
 	}
 
 	return system, messages, nil
+}
+
+const defaultAnthropicMaxTokens = 128000
+
+const codexCompactionSummaryPrompt = `Your task is to produce a faithful, concise summary of the conversation so far so that a successor assistant can continue the work seamlessly after the earlier turns are discarded. The successor will see the user's original query plus this summary. Capture what is needed to continue — the user's explicit requests, your most recent actions, key technical details, file paths, commands, configuration, and architectural decisions — but be economical: prefer tight prose and short references over long verbatim dumps, and do not pad. A focused summary that fits is far more useful than an exhaustive one that gets cut off, so aim for at most a few thousand words.
+
+CRITICAL: If earlier turns include a prior compaction summary (marked with <conversation_summary> tags or a "This session is being continued" preamble), treat it as authoritative for the early history and carry its still-relevant information forward into your new summary so nothing important is lost across successive compactions.
+
+Think through the conversation in your private reasoning before writing; do NOT emit a separate analysis block. Output the final summary inside a single <summary>...</summary> block, organized into the following numbered sections. Include every section heading even if a section is empty (write "None" in that section):
+
+1. Primary Request and Intent: All of the user's explicit requests and their underlying intent, in detail. Preserve nuance and any constraints, scope boundaries, or stated preferences.
+2. Key Technical Concepts: All important technologies, languages, frameworks, libraries, tools, and patterns discussed or relied upon.
+3. Files and Code Sections: Every file examined, created, or modified. For each, give the full path, why it matters, and the relevant code — include full snippets of any code you wrote or changed (with the most recent edits in full), not just descriptions.
+4. Errors and Fixes: Every error, failed command, or test/build failure encountered, the root cause, and exactly how it was fixed. Note any fix that came from user feedback verbatim.
+5. Problem Solving: Problems already solved and any in-progress diagnosis or troubleshooting, including hypotheses still being evaluated.
+6. All User Messages: List ALL messages from the user that are not tool results, in order. These are critical for understanding intent and how it evolved. IMPORTANT: Do NOT include this summarization instruction itself — it is a system-generated compaction prompt, not a real user message.
+7. Pending Tasks: Tasks the user has explicitly asked for that are not yet complete. Do not invent tasks the user never requested.
+8. Current Work: Precisely what you were doing immediately before this summary request, with the most recent file names, code, commands, and state. Be specific enough that work can resume mid-stream.
+9. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
+
+IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</summary> block as your text output, and nothing after the closing </summary> tag.`
+
+func mustMarshalAnthropicContent(blocks []AnthropicContentBlock) []byte {
+	encoded, _ := json.Marshal(blocks)
+	return encoded
 }
 
 // dropTrailingAnthropicThinkingBlocks removes thinking blocks from the end of
@@ -339,6 +395,22 @@ func dropTrailingAnthropicThinkingBlocks(messages []AnthropicMessage) []Anthropi
 		filtered = append(filtered, msg)
 	}
 	return filtered
+}
+
+func responsesCompactionSummary(item ResponsesInputItem) string {
+	// Compaction summaries may use either the OpenAI item type or the older
+	// compaction_summary alias, but their payload is the same reasoning-style
+	// summary array. Keep all parts in order.
+	var b strings.Builder
+	for _, part := range item.Summary {
+		if part.Text != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(part.Text)
+		}
+	}
+	return b.String()
 }
 
 func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {

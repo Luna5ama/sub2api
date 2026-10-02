@@ -206,6 +206,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	state.FunctionTools = functionTools
 	state.ToolSearchDeclared = toolSearch
 	state.NamespaceTools = namespaceTools
+	state.CompactionOnly = IsOpenAINativeCompactionV2(c)
 	clientDisconnected := false
 
 	writeEvents := func(events []apicompat.ResponsesStreamEvent) {
@@ -237,6 +238,14 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	scan := s.scanCCStream(c, resp, "openai responses chat fallback", requestID, startTime, func(chunk *apicompat.ChatCompletionsChunk) {
 		events := apicompat.ChatCompletionsChunkToResponsesEvents(chunk, state)
 		s.cacheReasoningItemsFromEvents(events)
+		if state.CompactionOnly {
+			for _, event := range events {
+				if event.Type == "response.created" {
+					writeEvents([]apicompat.ResponsesStreamEvent{event})
+				}
+			}
+			return
+		}
 		writeEvents(events)
 	})
 

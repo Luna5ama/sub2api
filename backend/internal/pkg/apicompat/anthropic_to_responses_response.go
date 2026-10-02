@@ -148,6 +148,35 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	return out
 }
 
+// AnthropicResponseToCodexCompactionResponse renders a plain Anthropic text
+// response as Codex remote-compaction v2 output. Codex accepts exactly one
+// compaction item, so reasoning and any accidental tool output are discarded.
+func AnthropicResponseToCodexCompactionResponse(resp *AnthropicResponse) *ResponsesResponse {
+	out := AnthropicToResponsesResponse(resp)
+	var summary string
+	for _, item := range out.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Text == "" {
+				continue
+			}
+			if summary != "" {
+				summary += "\n"
+			}
+			summary += part.Text
+		}
+	}
+	out.Output = []ResponsesOutput{{
+		Type:             "compaction",
+		ID:               "cmp_" + generateItemID(),
+		Status:           "completed",
+		EncryptedContent: encodePlaintextCompactionSummary(summary),
+	}}
+	return out
+}
+
 // anthropicStopReasonToResponsesStatus maps Anthropic stop_reason to Responses status.
 func anthropicStopReasonToResponsesStatus(stopReason string, blocks []AnthropicContentBlock) string {
 	switch stopReason {
@@ -176,6 +205,10 @@ type AnthropicEventToResponsesState struct {
 	CreatedSent bool
 	// CompletedSent tracks whether the terminal event has been emitted.
 	CompletedSent bool
+
+	// CompactionOnly suppresses ordinary output items for a Codex remote
+	// compaction v2 request; the final response must contain one compaction.
+	CompactionOnly bool
 
 	// Current output tracking
 	OutputIndex     int
@@ -261,6 +294,23 @@ func FinalizeAnthropicResponsesStream(state *AnthropicEventToResponsesState) []R
 	}
 
 	var events []ResponsesStreamEvent
+	if state.CompactionOnly {
+		item := ResponsesOutput{
+			Type:             "compaction",
+			ID:               "cmp_" + generateItemID(),
+			Status:           "completed",
+			EncryptedContent: encodePlaintextCompactionSummary(anthropicStateSummaryText(state)),
+		}
+		events = append(events, makeResponsesEvent(state, "response.output_item.done", &ResponsesStreamEvent{
+			OutputIndex: 0,
+			Item:        &item,
+		}))
+		completed := makeResponsesCompletedEvent(state, "completed", nil)
+		completed.Response.Output = []ResponsesOutput{item}
+		events = append(events, completed)
+		state.CompletedSent = true
+		return events
+	}
 
 	// Close any open item
 	events = append(events, closeCurrentResponsesItem(state)...)
@@ -269,6 +319,35 @@ func FinalizeAnthropicResponsesStream(state *AnthropicEventToResponsesState) []R
 	events = append(events, makeResponsesCompletedEvent(state, status, incompleteDetails))
 	state.CompletedSent = true
 	return events
+}
+
+func anthropicStateSummaryText(state *AnthropicEventToResponsesState) string {
+	if state == nil {
+		return ""
+	}
+	var b strings.Builder
+	appendText := func(text string) {
+		if text == "" {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text)
+	}
+	appendText(state.TextAccum)
+	for _, part := range state.CurrentContent {
+		appendText(part.Text)
+	}
+	for _, item := range state.Outputs {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			appendText(part.Text)
+		}
+	}
+	return b.String()
 }
 
 // ResponsesEventToSSE formats a ResponsesStreamEvent as an SSE data line.
@@ -310,6 +389,9 @@ func anthToResHandleMessageStart(evt *AnthropicStreamEvent, state *AnthropicEven
 }
 
 func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *AnthropicEventToResponsesState) []ResponsesStreamEvent {
+	if state.CompactionOnly {
+		return nil
+	}
 	if evt.ContentBlock == nil {
 		return nil
 	}
@@ -422,6 +504,9 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 			return nil
 		}
 		state.TextAccum += evt.Delta.Text
+		if state.CompactionOnly {
+			return nil
+		}
 		return []ResponsesStreamEvent{makeResponsesEvent(state, "response.output_text.delta", &ResponsesStreamEvent{
 			OutputIndex:  state.OutputIndex,
 			ContentIndex: state.ContentIndex,
@@ -469,6 +554,9 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 }
 
 func anthToResHandleContentBlockStop(evt *AnthropicStreamEvent, state *AnthropicEventToResponsesState) []ResponsesStreamEvent {
+	if state.CompactionOnly {
+		return nil
+	}
 	switch state.CurrentItemType {
 	case "reasoning":
 		// Emit reasoning summary done + output item done
@@ -572,6 +660,9 @@ func anthToResHandleMessageDelta(evt *AnthropicStreamEvent, state *AnthropicEven
 func anthToResHandleMessageStop(state *AnthropicEventToResponsesState) []ResponsesStreamEvent {
 	if state.CompletedSent {
 		return nil
+	}
+	if state.CompactionOnly {
+		return FinalizeAnthropicResponsesStream(state)
 	}
 
 	var events []ResponsesStreamEvent

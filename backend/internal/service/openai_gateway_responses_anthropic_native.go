@@ -276,6 +276,9 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 		finalResp.Model = upstreamModel
 	}
 	responsesResp := apicompat.AnthropicToResponsesResponse(finalResp)
+	if IsOpenAINativeCompactionV2(c) {
+		responsesResp = apicompat.AnthropicResponseToCodexCompactionResponse(finalResp)
+	}
 	responsesResp.Model = originalModel
 
 	if s.responseHeaderFilter != nil {
@@ -334,6 +337,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 	state := apicompat.NewAnthropicEventToResponsesState()
 	state.Model = originalModel
 	state.PreserveThinkingSignatures = isClaude55SignedThinkingModel(upstreamModel)
+	state.CompactionOnly = IsOpenAINativeCompactionV2(c)
 	clientToolRestorer := apicompat.NewResponsesClientToolStreamRestorer(clientToolMapping)
 
 	var usage ClaudeUsage

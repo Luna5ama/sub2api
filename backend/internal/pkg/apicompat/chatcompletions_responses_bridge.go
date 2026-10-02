@@ -335,12 +335,30 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 		return nil, fmt.Errorf("parse responses input: %w", err)
 	}
 
+	compactionTrigger := false
+	for _, raw := range rawItems {
+		var item struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		if item.Type == "compaction_trigger" {
+			compactionTrigger = true
+		}
+	}
+
 	built, mediaByCallID, err := buildChatMessagesFromItems(messages, rawItems, opts)
 	if err != nil {
 		return nil, err
 	}
 	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
-	return normalizeResponsesDerivedChatMessageRoles(normalized), nil
+	normalized = normalizeResponsesDerivedChatMessageRoles(normalized)
+	if compactionTrigger {
+		content, _ := json.Marshal(codexCompactionSummaryPrompt)
+		normalized = append(normalized, ChatMessage{Role: "user", Content: content})
+	}
+	return normalized, nil
 }
 
 // normalizeResponsesDerivedChatMessageRoles rewrites the Chat Completions
@@ -463,6 +481,15 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			}
 			if pendingReasoning != "" {
 				lastTurnReasoning = pendingReasoning
+			}
+			continue
+		case "compaction":
+			if summary, ok := decodePlaintextCompactionSummary(rawString(item["encrypted_content"])); ok && summary != "" {
+				encodedSummary, _ := json.Marshal(summary)
+				messages = append(messages, ChatMessage{
+					Role:    "user",
+					Content: []byte(`"<conversation_summary>"` + string(encodedSummary) + `"</conversation_summary>"`),
+				})
 			}
 			continue
 		case "function_call":
@@ -1631,6 +1658,13 @@ type ChatCompletionsToResponsesStreamState struct {
 
 	FinishReason string
 	Usage        *ResponsesUsage
+
+	// CompactionOnly marks an explicit Codex remote-compaction v2 request.
+	// The final stream must contain exactly one compaction item; ordinary
+	// reasoning/message/tool outputs would make Codex reject the compact task.
+	CompactionOnly bool
+	// CompactionItemID keeps the streamed and terminal compaction items identical.
+	CompactionItemID string
 }
 
 // NewChatCompletionsToResponsesStreamState returns an initialized stream state.
@@ -1639,6 +1673,7 @@ func NewChatCompletionsToResponsesStreamState(model string) *ChatCompletionsToRe
 		ResponseID:       generateResponsesID(),
 		Model:            model,
 		Created:          time.Now().Unix(),
+		CompactionItemID: "cmp_" + generateItemID(),
 		ToolCalls:        make(map[int]*ChatToolCall),
 		ToolItemIDs:      make(map[int]string),
 		ToolOutputIndex:  make(map[int]int),
@@ -1804,43 +1839,56 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 	var events []ResponsesStreamEvent
 	events = append(events, ensureChatToResponsesCreated(state)...)
 
-	// Close a reasoning item that never transitioned to content (reasoning-only
-	// or empty completion).
-	events = append(events, closeChatReasoningItem(state)...)
-	events = append(events, synthesizeChatReasoningFallbackMessage(state)...)
-
-	if state.MessageItemID != "" {
-		if state.TextPartOpen {
-			events = append(events, chatToResponsesEvent(state, "response.output_text.done", &ResponsesStreamEvent{
-				OutputIndex:  state.MessageIndex,
-				ContentIndex: 0,
-				Text:         state.Text.String(),
-				ItemID:       state.MessageItemID,
-			}))
-			events = append(events, chatToResponsesEvent(state, "response.content_part.done", &ResponsesStreamEvent{
-				OutputIndex:  state.MessageIndex,
-				ContentIndex: 0,
-				ItemID:       state.MessageItemID,
-				Part:         &ResponsesContentPart{Type: "output_text", Text: state.Text.String()},
-			}))
+	if state.CompactionOnly {
+		item := ResponsesOutput{
+			Type:             "compaction",
+			ID:               state.CompactionItemID,
+			Status:           "completed",
+			EncryptedContent: encodePlaintextCompactionSummary(state.Text.String()),
 		}
 		events = append(events, chatToResponsesEvent(state, "response.output_item.done", &ResponsesStreamEvent{
-			OutputIndex: state.MessageIndex,
-			Item: &ResponsesOutput{
-				Type:    "message",
-				ID:      state.MessageItemID,
-				Role:    "assistant",
-				Content: []ResponsesContentPart{{Type: "output_text", Text: state.Text.String()}},
-				Status:  "completed",
-			},
+			OutputIndex: 0,
+			Item:        &item,
 		}))
-	}
+	} else {
+		// Close a reasoning item that never transitioned to content (reasoning-only
+		// or empty completion).
+		events = append(events, closeChatReasoningItem(state)...)
+		events = append(events, synthesizeChatReasoningFallbackMessage(state)...)
 
-	// Close every function_call item opened during the stream. Codex finalizes a
-	// tool call only after function_call_arguments.done + output_item.done for
-	// that item; without them the call never completes and the session wedges.
-	// Mirrors cc-switch's finalize_tools.
-	events = append(events, closeChatToolItems(state)...)
+		if state.MessageItemID != "" {
+			if state.TextPartOpen {
+				events = append(events, chatToResponsesEvent(state, "response.output_text.done", &ResponsesStreamEvent{
+					OutputIndex:  state.MessageIndex,
+					ContentIndex: 0,
+					Text:         state.Text.String(),
+					ItemID:       state.MessageItemID,
+				}))
+				events = append(events, chatToResponsesEvent(state, "response.content_part.done", &ResponsesStreamEvent{
+					OutputIndex:  state.MessageIndex,
+					ContentIndex: 0,
+					ItemID:       state.MessageItemID,
+					Part:         &ResponsesContentPart{Type: "output_text", Text: state.Text.String()},
+				}))
+			}
+			events = append(events, chatToResponsesEvent(state, "response.output_item.done", &ResponsesStreamEvent{
+				OutputIndex: state.MessageIndex,
+				Item: &ResponsesOutput{
+					Type:    "message",
+					ID:      state.MessageItemID,
+					Role:    "assistant",
+					Content: []ResponsesContentPart{{Type: "output_text", Text: state.Text.String()}},
+					Status:  "completed",
+				},
+			}))
+		}
+
+		// Close every function_call item opened during the stream. Codex finalizes a
+		// tool call only after function_call_arguments.done + output_item.done for
+		// that item; without them the call never completes and the session wedges.
+		// Mirrors cc-switch's finalize_tools.
+		events = append(events, closeChatToolItems(state)...)
+	}
 
 	status := "completed"
 	var incompleteDetails *ResponsesIncompleteDetails
@@ -1858,7 +1906,7 @@ func FinalizeChatCompletionsResponsesStream(state *ChatCompletionsToResponsesStr
 			Model:             state.Model,
 			Status:            status,
 			ServiceTier:       state.ServiceTier,
-			Output:            state.chatOutput(),
+			Output:            state.terminalOutput(),
 			Usage:             state.Usage,
 			IncompleteDetails: incompleteDetails,
 		},
@@ -2233,6 +2281,18 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		})
 	}
 	return outputs
+}
+
+func (state *ChatCompletionsToResponsesStreamState) terminalOutput() []ResponsesOutput {
+	if state != nil && state.CompactionOnly {
+		return []ResponsesOutput{{
+			Type:             "compaction",
+			ID:               state.CompactionItemID,
+			Status:           "completed",
+			EncryptedContent: encodePlaintextCompactionSummary(state.Text.String()),
+		}}
+	}
+	return state.chatOutput()
 }
 
 func chatToResponsesEvent(
