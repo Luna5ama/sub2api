@@ -68,7 +68,14 @@ func addMessageCacheBreakpoints(body []byte) []byte {
 		return body
 	}
 
-	body = injectCacheControlOnLastContentBlock(body, len(arr)-1, &arr[len(arr)-1])
+	lastIdx := len(arr) - 1
+	if arr[lastIdx].Get("role").String() == "assistant" {
+		if idx := lastSendableAssistantContentBlock(&arr[lastIdx]); idx >= 0 {
+			body = injectCacheControlOnContentBlock(body, lastIdx, idx)
+		}
+	} else {
+		body = injectCacheControlOnLastContentBlock(body, lastIdx, &arr[lastIdx])
+	}
 
 	if len(arr) >= 4 {
 		userCount := 0
@@ -94,6 +101,29 @@ func (s *GatewayService) rewriteMessageCacheControlIfEnabled(ctx context.Context
 	}
 	body = stripMessageCacheControl(body)
 	return addMessageCacheBreakpoints(body)
+}
+
+// addResponsesAnthropicCacheBreakpoints gives Responses-originated Anthropic
+// requests the same stable history anchors as the opt-in Messages rewrite.
+// The inbound protocol cannot carry Anthropic cache_control, so stripping first
+// is still defensive for bridge-injected history rather than a semantic change.
+func addResponsesAnthropicCacheBreakpoints(body []byte) []byte {
+	return addMessageCacheBreakpoints(stripMessageCacheControl(body))
+}
+
+func lastSendableAssistantContentBlock(msg *gjson.Result) int {
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return -1
+	}
+	blocks := content.Array()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		blockType := blocks[i].Get("type").String()
+		if blockType != "thinking" && blockType != "redacted_thinking" {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *GatewayService) isRewriteMessageCacheControlEnabled(ctx context.Context) bool {
@@ -133,15 +163,20 @@ func injectCacheControlOnLastContentBlock(body []byte, idx int, msg *gjson.Resul
 	if len(contentArr) == 0 {
 		return body
 	}
-	lastBlockIdx := len(contentArr) - 1
-	lastBlock := contentArr[lastBlockIdx]
+	return injectCacheControlOnContentBlock(body, idx, len(contentArr)-1)
+}
 
-	if cc := lastBlock.Get("cache_control"); cc.Exists() && cc.Get("ttl").String() != "" {
+func injectCacheControlOnContentBlock(body []byte, idx, blockIdx int) []byte {
+	block := gjson.GetBytes(body, fmt.Sprintf("messages.%d.content.%d", idx, blockIdx))
+	if !block.Exists() {
+		return body
+	}
+	if cc := block.Get("cache_control"); cc.Exists() && cc.Get("ttl").String() != "" {
 		return body
 	}
 
-	pathPrefix := fmt.Sprintf("messages.%d.content.%d.cache_control", idx, lastBlockIdx)
-	existingCC := lastBlock.Get("cache_control")
+	pathPrefix := fmt.Sprintf("messages.%d.content.%d.cache_control", idx, blockIdx)
+	existingCC := block.Get("cache_control")
 	if existingCC.Exists() {
 		if next, err := sjson.SetBytes(body, pathPrefix+".ttl", claude.DefaultCacheControlTTL); err == nil {
 			body = next

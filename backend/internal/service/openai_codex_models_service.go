@@ -333,15 +333,16 @@ func openAIConfiguredCodexModelIDsForGroup(accounts []Account, group *Group) []s
 }
 
 const (
-	configuredCodexModelPriority       = 50
-	configuredCodexCustomDescription   = "Custom model routed through Sub2API."
-	configuredCodexFallbackContext     = 272_000
-	configuredCodexDeepSeekV4Context   = 1_000_000
-	configuredCodexGrokContext         = 500_000
-	configuredCodexGrokBuildContext    = 256_000
-	configuredCodexGPT56MaxContext     = 872_000
-	configuredCodexGPT6AstraContext    = 1_050_000
-	configuredCodexToolOutputMaxTokens = 10_000
+	configuredCodexModelPriority           = 50
+	configuredCodexCustomDescription       = "Custom model routed through Sub2API."
+	configuredCodexFallbackContext         = 272_000
+	configuredCodexFallbackMaxOutputTokens = 128_000
+	configuredCodexDeepSeekV4Context       = 1_000_000
+	configuredCodexGrokContext             = 500_000
+	configuredCodexGrokBuildContext        = 256_000
+	configuredCodexGPT56MaxContext         = 872_000
+	configuredCodexGPT6AstraContext        = 1_050_000
+	configuredCodexToolOutputMaxTokens     = 10_000
 )
 
 type configuredCodexReasoningLevel struct {
@@ -408,6 +409,7 @@ type configuredCodexModelDescriptor struct {
 	SupportsParallelToolCalls         bool                            `json:"supports_parallel_tool_calls"`
 	ContextWindow                     int64                           `json:"context_window"`
 	MaxContextWindow                  int64                           `json:"max_context_window"`
+	MaxOutputTokens                   int64                           `json:"max_output_tokens,omitempty"`
 	AutoCompactTokenLimit             any                             `json:"auto_compact_token_limit"`
 	CompHash                          any                             `json:"comp_hash"`
 	EffectiveContextWindowPercent     int64                           `json:"effective_context_window_percent"`
@@ -453,6 +455,7 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		TruncationPolicy:                  configuredCodexTruncationPolicy{Mode: "bytes", Limit: configuredCodexToolOutputMaxTokens},
 		ContextWindow:                     configuredCodexFallbackContext,
 		MaxContextWindow:                  configuredCodexFallbackContext,
+		MaxOutputTokens:                   configuredCodexFallbackMaxOutputTokens,
 		EffectiveContextWindowPercent:     95,
 		ExperimentalSupportedTools:        []string{},
 		InputModalities:                   []string{"text"},
@@ -490,6 +493,7 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		if claude.IsOpus55(modelID) || claude.IsSonnet55(modelID) {
 			descriptor.ContextWindow = 1_000_000
 			descriptor.MaxContextWindow = 1_000_000
+			descriptor.MaxOutputTokens = 128_000
 		}
 		descriptor.DisplayName = claudeCodexDisplayName(modelID)
 		descriptor.Description = "Claude coding and reasoning model routed through Sub2API."

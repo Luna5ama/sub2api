@@ -39,7 +39,7 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 	}
 	if out.MaxTokens == 0 {
 		// Anthropic requires max_tokens; default to a sensible value.
-		out.MaxTokens = 8192
+		out.MaxTokens = 128000
 	}
 
 	// Convert tools
@@ -302,6 +302,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	messages = mergeConsecutiveMessages(messages)
 	messages = normalizeAnthropicToolPairing(messages)
 	messages = mergeConsecutiveMessages(messages)
+	messages = dropTrailingAnthropicThinkingBlocks(messages)
 
 	var system json.RawMessage
 	if len(systemParts) > 0 {
@@ -309,6 +310,35 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	}
 
 	return system, messages, nil
+}
+
+// dropTrailingAnthropicThinkingBlocks removes thinking blocks from the end of
+// each assistant message. Anthropic rejects a request whose final content block
+// is thinking; Codex can replay such a truncated response on retry.
+func dropTrailingAnthropicThinkingBlocks(messages []AnthropicMessage) []AnthropicMessage {
+	filtered := messages[:0]
+	for _, msg := range messages {
+		blocks := parseContentBlocks(msg.Content)
+		if msg.Role == "assistant" && len(blocks) > 0 {
+			for len(blocks) > 0 {
+				last := blocks[len(blocks)-1]
+				if last.Type != "thinking" && last.Type != "redacted_thinking" {
+					break
+				}
+				blocks = blocks[:len(blocks)-1]
+			}
+			if len(blocks) == 0 {
+				continue
+			}
+			content, err := json.Marshal(blocks)
+			if err != nil {
+				continue
+			}
+			msg.Content = content
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
 }
 
 func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {

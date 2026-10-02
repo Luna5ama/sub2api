@@ -2,6 +2,7 @@ package apicompat
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1880,6 +1881,49 @@ func TestOpus55SignedThinkingResponsesRoundTrip(t *testing.T) {
 	// Arbitrary OpenAI ciphertext must never be treated as an Anthropic signature.
 	_, _, err = convertResponsesInputToAnthropic("", json.RawMessage(`[{"type":"reasoning","encrypted_content":"anthropic-thinking-v1:!"}]`), true)
 	require.Error(t, err)
+}
+
+func TestResponsesToAnthropicMaxTokensDefaultFollowsClaudeCodingCeiling(t *testing.T) {
+	for _, model := range []string{"claude-opus-5-5", "claude-sonnet-5-5", "unknown-model"} {
+		out, err := ResponsesToAnthropicRequest(&ResponsesRequest{Model: model, Input: json.RawMessage(`"hello"`)})
+		require.NoError(t, err)
+		require.Equal(t, 128000, out.MaxTokens, model)
+	}
+	limit := 4096
+	out, err := ResponsesToAnthropicRequest(&ResponsesRequest{
+		Model:           "claude-opus-5-5",
+		Input:           json.RawMessage(`"hello"`),
+		MaxOutputTokens: &limit,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 4096, out.MaxTokens)
+}
+
+func TestResponsesToAnthropicDropsTrailingThinkingBlocks(t *testing.T) {
+	thinking := AnthropicContentBlock{Type: "thinking", Signature: "signed"}
+	encoded := encodeAnthropicThinking(thinking)
+	input := fmt.Sprintf(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+		{"type":"reasoning","encrypted_content":%q},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+	]`, encoded)
+
+	out, err := ResponsesToAnthropicRequest(&ResponsesRequest{
+		Model: "claude-opus-5-5",
+		Input: json.RawMessage(input),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, out.Messages)
+	last := out.Messages[len(out.Messages)-1]
+	require.NotEqual(t, "assistant", last.Role)
+	for _, msg := range out.Messages {
+		blocks := parseContentBlocks(msg.Content)
+		if len(blocks) == 0 || msg.Role != "assistant" {
+			continue
+		}
+		require.NotEqual(t, "thinking", blocks[len(blocks)-1].Type)
+		require.NotEqual(t, "redacted_thinking", blocks[len(blocks)-1].Type)
+	}
 }
 
 func TestSonnet55ResponsesThinkingAndSampling(t *testing.T) {

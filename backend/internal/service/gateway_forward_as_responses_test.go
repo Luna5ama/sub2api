@@ -638,3 +638,26 @@ func TestClaude55BridgeUsesMappedModelBeforeThinkingConversion(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardAsResponsesInjectsStableAnthropicCacheAnchors(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public-claude","input":"hello"}`))
+	upstream := &anthropicHTTPUpstreamRecorder{resp: &http.Response{
+		StatusCode: 200, Header: http.Header{},
+		Body: io.NopCloser(strings.NewReader(namespaceToolAnthropicStream())),
+	}}
+	svc := &GatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":       "fixture-key",
+			"model_mapping": map[string]any{"public-claude": "claude-opus-5-5"},
+		},
+	}
+
+	_, err := svc.ForwardAsResponses(context.Background(), c, account, []byte(`{"model":"public-claude","input":"hello"}`), nil)
+	require.NoError(t, err)
+	require.Equal(t, "5m", gjson.GetBytes(upstream.lastBody, "messages.0.content.0.cache_control.ttl").String())
+	require.Equal(t, int64(128000), gjson.GetBytes(upstream.lastBody, "max_tokens").Int())
+}

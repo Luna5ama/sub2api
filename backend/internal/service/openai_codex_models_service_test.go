@@ -321,6 +321,7 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 	require.Equal(t, "Claude Sonnet 5.5", claudeSonnet55.DisplayName)
 	require.Equal(t, int64(1_000_000), claudeSonnet55.ContextWindow)
 	require.Equal(t, int64(1_000_000), claudeSonnet55.MaxContextWindow)
+	require.Equal(t, int64(128_000), claudeSonnet55.MaxOutputTokens)
 	require.Equal(t, "high", *claudeSonnet55.DefaultReasoningLevel)
 	require.Equal(t, []string{"low", "medium", "high", "xhigh", "max"}, effortsFromConfiguredCodexLevels(claudeSonnet55.SupportedReasoningLevels))
 
@@ -419,6 +420,41 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 	require.NotEmpty(t, custom.ModelMessages.InstructionsTemplate)
 	require.Equal(t, "auto", custom.DefaultReasoningSummary)
 	require.Equal(t, configuredCodexTruncationPolicy{Mode: "bytes", Limit: 10_000}, custom.TruncationPolicy)
+}
+
+func TestCodexManifestIncludesAndOverridesMaxOutputTokens(t *testing.T) {
+	account := Account{
+		Platform: PlatformAnthropic,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"model_mapping": map[string]string{"claude-opus-5-5": "claude-opus-5-5"},
+		},
+	}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Models: map[string]UpstreamModelMetadata{
+			"claude-opus-5-5": {
+				ID:              "claude-opus-5-5",
+				ContextWindow:   1_000_000,
+				MaxOutputTokens: 98_765,
+			},
+		},
+	})
+	metadata, ok := account.GetUpstreamModelMetadata("claude-opus-5-5")
+	require.True(t, ok)
+
+	body, err := buildCodexModelsManifest(
+		[]string{"claude-opus-5-5"},
+		nil,
+		nil,
+		nil,
+		map[string]codexModelMetadataOverride{
+			"claude-opus-5-5": intersectUpstreamModelMetadata("claude-opus-5-5", []UpstreamModelMetadata{metadata}),
+		},
+	)
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	require.Equal(t, float64(98765), models[0]["max_output_tokens"])
 }
 
 func TestBuildCodexModelsManifestUsesGPT6AstraInstructions(t *testing.T) {

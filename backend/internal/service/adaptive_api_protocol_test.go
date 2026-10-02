@@ -185,6 +185,23 @@ func TestAdaptiveProtocolRoutesKimiResponsesToNativeResponses(t *testing.T) {
 	require.False(t, gjson.GetBytes(upstream.lastBody, "previous_response_id").Exists())
 }
 
+func TestAdaptiveProtocolResponsesViaAnthropicInjectsStableCacheAnchors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"claude-opus-5-5","input":"hello","stream":false}`)
+	upstream := &httpUpstreamRecorder{err: errors.New("stop after capture")}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+	account := adaptiveProtocolTestAccount(PlatformZhipu, map[string]any{
+		APIProtocolAnthropic: "http://anthropic.example",
+	})
+	account.Credentials["api_protocol"] = APIProtocolAnthropic
+
+	_, err := svc.Forward(context.Background(), adaptiveProtocolTestContext("/v1/responses", body), account, body)
+	require.Error(t, err)
+	require.Equal(t, "https://open.bigmodel.cn/api/anthropic/v1/messages", upstream.lastReq.URL.String())
+	require.Equal(t, "5m", gjson.GetBytes(upstream.lastBody, "messages.0.content.0.cache_control.ttl").String())
+	require.Equal(t, int64(128000), gjson.GetBytes(upstream.lastBody, "max_tokens").Int())
+}
+
 func TestAdaptiveProtocolRoutesKimiCodingResponsesToNativeResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"k3-256k","input":"hello","stream":false}`)

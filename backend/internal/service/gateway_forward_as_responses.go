@@ -117,6 +117,7 @@ func (s *GatewayService) ForwardAsResponses(
 	if shouldMimicClaudeCode {
 		anthropicBody = s.applyClaudeCodeOAuthMimicryToBody(ctx, c, account, anthropicBody, anthropicReq.System, mappedModel)
 	}
+	anthropicBody = addResponsesAnthropicCacheBreakpoints(anthropicBody)
 
 	// 7. Enforce cache_control block limit
 	anthropicBody = enforceCacheControlLimit(anthropicBody)

@@ -389,6 +389,15 @@ func intersectUpstreamModelMetadata(modelID string, candidates []UpstreamModelMe
 			result.MaxContextWindow = maxContextWindow
 		}
 	}
+	for i, candidate := range candidates {
+		if candidate.MaxOutputTokens <= 0 {
+			result.MaxOutputTokens = 0
+			break
+		}
+		if i == 0 || candidate.MaxOutputTokens < result.MaxOutputTokens {
+			result.MaxOutputTokens = candidate.MaxOutputTokens
+		}
+	}
 	return result
 }
 
@@ -447,6 +456,9 @@ func applyUpstreamModelMetadataToCodexDescriptor(
 	if metadata.MaxContextWindow > 0 {
 		descriptor.MaxContextWindow = metadata.MaxContextWindow
 		descriptor.ContextWindow = min(descriptor.ContextWindow, metadata.MaxContextWindow)
+	}
+	if metadata.MaxOutputTokens > 0 {
+		descriptor.MaxOutputTokens = metadata.MaxOutputTokens
 	}
 }
 

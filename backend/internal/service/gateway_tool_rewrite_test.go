@@ -253,6 +253,19 @@ func TestRewriteMessageCacheControlIfEnabled_OptInPreservesLegacyRewrite(t *test
 	require.Equal(t, "5m", gjson.GetBytes(out, "messages.3.content.0.cache_control.ttl").String())
 }
 
+func TestResponsesAnthropicCacheBreakpointsSkipTrailingThinking(t *testing.T) {
+	body := []byte(`{"messages":[
+		{"role":"user","content":[{"type":"text","text":"stable"}]},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"secret","signature":"sig"},{"type":"text","text":"answer"}]},
+		{"role":"assistant","content":[{"type":"thinking","thinking":"truncated","signature":"sig"}]}
+	]}`)
+
+	out := addResponsesAnthropicCacheBreakpoints(body)
+
+	require.False(t, gjson.GetBytes(out, "messages.1.content.1.cache_control").Exists())
+	require.False(t, gjson.GetBytes(out, "messages.2.content.0.cache_control").Exists())
+}
+
 func TestBuildToolNameRewriteFromBody_ReverseOrderedByLengthDesc(t *testing.T) {
 	// 超过阈值触发动态映射，验证 ReverseOrdered 按假名长度倒序排列
 	body := []byte(`{"tools":[
