@@ -308,3 +308,84 @@ func TestStream_SSEWireComplete(t *testing.T) {
 	require.True(t, strings.Contains(addedLine, `"arguments":""`), "added line missing arguments: %s", addedLine)
 	require.Contains(t, addedLine, `"call_id":"call_a"`)
 }
+
+// TestStream_InterleavedReasoningOpensNewSegment guards the interleaved-thinking
+// shape (reasoning -> text/tool call -> reasoning again). A delta must never be
+// emitted against a reasoning item that was already closed; each contiguous run
+// opens its own item.
+func TestStream_InterleavedReasoningOpensNewSegment(t *testing.T) {
+	events := collectStreamEvents(t, []string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"first run"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"exec","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"second run"}}]}`,
+	})
+
+	type itemState struct {
+		itemType string
+		open     bool
+	}
+	open := map[int]*itemState{}
+	reasoningItems := map[string]bool{}
+	for _, e := range events {
+		switch e.Type {
+		case "response.output_item.added":
+			require.NotNil(t, e.Item)
+			open[e.OutputIndex] = &itemState{itemType: e.Item.Type, open: true}
+			if e.Item.Type == "reasoning" {
+				reasoningItems[e.Item.ID] = true
+			}
+		case "response.output_item.done":
+			require.NotNil(t, open[e.OutputIndex], "done without added at index %d", e.OutputIndex)
+			open[e.OutputIndex].open = false
+		case "response.reasoning_summary_text.delta":
+			state := open[e.OutputIndex]
+			require.NotNil(t, state, "reasoning delta without an open item at index %d", e.OutputIndex)
+			require.True(t, state.open, "reasoning delta on a closed item at index %d", e.OutputIndex)
+			require.Equal(t, "reasoning", state.itemType)
+			require.Contains(t, reasoningItems, e.ItemID)
+		}
+	}
+
+	// The two reasoning runs must be distinct items, each fully closed.
+	var reasoningDones []string
+	for _, e := range events {
+		if e.Type == "response.output_item.done" && e.Item != nil && e.Item.Type == "reasoning" {
+			reasoningDones = append(reasoningDones, e.Item.ID)
+		}
+	}
+	require.Len(t, reasoningDones, 2, "each reasoning run needs its own closed item")
+	require.NotEqual(t, reasoningDones[0], reasoningDones[1])
+}
+
+// TestStream_TerminalOutputReusesStreamedItemIDs guards that the response
+// carried on response.completed reuses the ids/indexes streamed in the
+// output_item.done events instead of minting fresh ones.
+func TestStream_TerminalOutputReusesStreamedItemIDs(t *testing.T) {
+	events := collectStreamEvents(t, []string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"think"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"exec","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+
+	streamed := map[string]bool{}
+	for _, e := range events {
+		if e.Type == "response.output_item.done" && e.Item != nil {
+			streamed[e.Item.Type+"|"+e.Item.ID] = true
+		}
+	}
+	require.NotEmpty(t, streamed)
+
+	var completed *ResponsesStreamEvent
+	for i := range events {
+		if events[i].Type == "response.completed" {
+			completed = &events[i]
+		}
+	}
+	require.NotNil(t, completed)
+	require.NotNil(t, completed.Response)
+	for _, item := range completed.Response.Output {
+		require.Truef(t, streamed[item.Type+"|"+item.ID],
+			"terminal output item %s %s never streamed with that id", item.Type, item.ID)
+	}
+}
