@@ -204,6 +204,7 @@ func groupCodexModelMetadata(
 		if strings.TrimSpace(lookupModel) != modelID {
 			publicAlias = true
 		}
+		_, hasOverride := account.ReasoningEffortOverrideFor(modelID, lookupModel)
 		metadata, ok := account.GetUpstreamModelMetadata(lookupModel)
 		if !ok {
 			if explicitTargetsConflict {
@@ -212,9 +213,16 @@ func groupCodexModelMetadata(
 					inputModalitiesConflict: true,
 				}, true
 			}
-			missingMetadata = true
+			// A manual capability declaration is enough on its own; only a
+			// truly undeclared account makes the group's capability unknown.
+			if !hasOverride {
+				missingMetadata = true
+			}
 		}
 		metadata.CodexToolCapabilities = accountCodexToolCapabilities(account, lookupModel)
+		// A hand-written account override is a capability declaration, so it
+		// outranks both the synced snapshot and the code family heuristics.
+		metadata = account.applyReasoningEffortOverrideToMetadata(metadata, modelID, lookupModel)
 		candidates = append(candidates, metadata)
 	}
 	if len(candidates) == 0 {

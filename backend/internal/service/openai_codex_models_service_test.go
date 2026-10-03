@@ -1167,6 +1167,107 @@ func TestBuildCodexModelsManifestForGroupLoadsAccountsOnce(t *testing.T) {
 	require.NotContains(t, repo.platforms, PlatformComposite)
 }
 
+// Scenario: a manual account override declares effort levels for a model that
+// the upstream catalog either omits or advertises differently.
+func TestBuildCodexModelsManifestForGroupUsesAccountReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
+
+	const groupID int64 = 736
+	reasoning := true
+	overridden := Account{
+		ID:       1,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"reasoning_effort_overrides": map[string]any{
+				"glm-5.3": map[string]any{"default": "high", "levels": []any{"low", "high", "max"}},
+				// The alias is declared even though the snapshot below offers
+				// the wider low/medium/high scale.
+				"deepseek-v4.1-flash": map[string]any{"default": "high", "levels": []any{"low", "high"}},
+			},
+		},
+	}
+	overridden.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{Models: map[string]UpstreamModelMetadata{
+		"deepseek-v4.1-flash": {
+			Reasoning:                &reasoning,
+			DefaultReasoningLevel:    "medium",
+			SupportedReasoningLevels: []string{"low", "medium", "high"},
+		},
+	}})
+
+	svc := &GatewayService{
+		accountRepo: codexModelsVisibilityAccountRepo{byGroup: map[int64][]Account{
+			groupID: {overridden},
+		}},
+	}
+
+	body, err := svc.BuildCodexModelsManifestForGroup(
+		context.Background(),
+		&Group{ID: groupID, Platform: PlatformOpenAI},
+		"",
+		[]string{"glm-5.3", "deepseek-v4.1-flash"},
+	)
+	require.NoError(t, err)
+
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 2)
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		slug, _ := model["slug"].(string)
+		bySlug[slug] = model
+	}
+
+	// No snapshot at all: the override alone must declare the capability.
+	glm := bySlug["glm-5.3"]
+	require.NotNil(t, glm)
+	require.Equal(t, "high", glm["default_reasoning_level"])
+	require.Equal(t, []string{"low", "high", "max"}, effortsFromManifestModel(t, glm))
+
+	// Synced metadata exists but the manual override narrows it.
+	deepSeek := bySlug["deepseek-v4.1-flash"]
+	require.NotNil(t, deepSeek)
+	require.Equal(t, "high", deepSeek["default_reasoning_level"])
+	require.Equal(t, []string{"low", "high"}, effortsFromManifestModel(t, deepSeek))
+}
+
+// Scenario: two accounts serving one public model must still intersect their
+// declared capability, so the manifest never advertises a level one account
+// cannot accept.
+func TestBuildCodexModelsManifestForGroupIntersectsAccountReasoningOverrides(t *testing.T) {
+	t.Parallel()
+
+	const groupID int64 = 737
+	newAccount := func(id int64, levels []any) Account {
+		return Account{
+			ID:       id,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Credentials: map[string]any{
+				"reasoning_effort_overrides": map[string]any{
+					"glm-5.3": map[string]any{"default": "low", "levels": levels},
+				},
+			},
+		}
+	}
+	svc := &GatewayService{
+		accountRepo: codexModelsVisibilityAccountRepo{byGroup: map[int64][]Account{
+			groupID: {newAccount(1, []any{"low", "high"}), newAccount(2, []any{"low", "high", "max"})},
+		}},
+	}
+
+	body, err := svc.BuildCodexModelsManifestForGroup(
+		context.Background(),
+		&Group{ID: groupID, Platform: PlatformOpenAI},
+		"",
+		[]string{"glm-5.3"},
+	)
+	require.NoError(t, err)
+
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	require.Equal(t, []string{"low", "high"}, effortsFromManifestModel(t, models[0]))
+}
+
 func TestBuildCodexModelsManifestForGroupUsesFallbackWhenTextOnlyPlatformHasNoSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -2145,6 +2246,65 @@ func TestFetchCodexModelsManifestAPIKeyConvertsStandardOpenAIModelList(t *testin
 	require.Equal(t, []any{"text", "image"}, models[1]["input_modalities"])
 	require.Equal(t, codexModelsManifestBodyETag(manifest.Body), manifest.ETag)
 	require.Equal(t, `W/"openai-list"`, manifest.upstreamETag)
+}
+
+// Scenario: a provider advertises a model but not its reasoning scale (or
+// advertises the wrong one). The account-level override must rewrite the
+// effort fields on the manifest served straight from that upstream.
+func TestCompleteAPIKeyCodexModelsManifestForClientAppliesReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://relay.example/v1",
+			"reasoning_effort_overrides": map[string]any{
+				"zai-org/GLM-5.3": map[string]any{"default": "high", "levels": []any{"low", "high", "max"}},
+			},
+		},
+	}
+	svc := &OpenAIGatewayService{}
+	body := []byte(`{"models":[{
+		"slug":"zai-org/GLM-5.3",
+		"display_name":"GLM-5.3",
+		"default_reasoning_level":"none",
+		"supported_reasoning_levels":[{"effort":"none","description":"nope"}]
+	}]}`)
+	manifest := &OpenAIModelsResponse{Body: body}
+
+	require.NoError(t, svc.CompleteAPIKeyCodexModelsManifestForClient(manifest, account))
+
+	models := decodeCodexManifestModels(t, manifest.Body)
+	require.Len(t, models, 1)
+	require.Equal(t, "high", models[0]["default_reasoning_level"])
+	require.Equal(t, []string{"low", "high", "max"}, effortsFromManifestModel(t, models[0]))
+}
+
+// The override must also declare effort for a model the provider list omits
+// entirely, since that is the "upstream does not advertise capability" case.
+func TestCompleteAPIKeyCodexModelsManifestForClientAddsReasoningEffortOverrideForBareModel(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://relay.example/v1",
+			"reasoning_effort_overrides": map[string]any{
+				"glm-5.3-flash": map[string]any{"default": "medium", "levels": []any{"low", "medium", "high"}},
+			},
+		},
+	}
+	svc := &OpenAIGatewayService{}
+	manifest := &OpenAIModelsResponse{Body: []byte(`{"models":[{"slug":"glm-5.3-flash","display_name":"GLM-5.3 Flash"}]}`)}
+
+	require.NoError(t, svc.CompleteAPIKeyCodexModelsManifestForClient(manifest, account))
+
+	models := decodeCodexManifestModels(t, manifest.Body)
+	require.Len(t, models, 1)
+	require.Equal(t, "medium", models[0]["default_reasoning_level"])
+	require.Equal(t, []string{"low", "medium", "high"}, effortsFromManifestModel(t, models[0]))
 }
 
 func TestConvertOpenAIModelListToCodexManifestUsesCompleteDescriptors(t *testing.T) {

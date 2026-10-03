@@ -1006,6 +1006,21 @@ export default {
         tooLong: '模型 ID 或显示名过长（最多 200 字符）',
         tooManyEntries: '模型显示名条目过多（最多 256 条）'
       },
+      reasoningEffortOverride: {
+        title: '推理挡位覆盖',
+        description: '声明该账号上游模型实际支持的推理挡位。优先级高于同步的元数据和内置家族默认值。',
+        hint: '留空的条目会被忽略。同一模型由多个账号提供时仍取交集，只会展示所有账号都接受的挡位。',
+        modelPlaceholder: '模型 ID（例如 glm-5.3）',
+        addRow: '添加挡位覆盖',
+        removeRow: '删除挡位覆盖',
+        defaultLevel: '默认挡位',
+        missingModel: '已选择挡位但没有填写模型 ID',
+        duplicateModel: '模型 ID 重复（每个模型只能声明一次）',
+        tooLong: '模型 ID 过长，或选择的挡位过多',
+        tooManyEntries: '挡位覆盖条目过多（最多 256 条）',
+        noLevels: '请至少选择一个挡位',
+        invalidDefault: '默认挡位必须是已选挡位之一'
+      },
       grokCustomBaseUrl: {
         title: '自定义上游地址',
         hint: '开启后账号流量（对话/媒体/探测）改发指定地址；OAuth 授权与令牌刷新不受影响，仍走官方端点。',

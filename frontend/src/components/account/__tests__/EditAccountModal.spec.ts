@@ -1880,5 +1880,34 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_display_names')
   })
 
+  it('loads and persists reasoning effort overrides', async () => {
+    const account = buildAccount()
+    account.credentials.reasoning_effort_overrides = {
+      'glm-5.3': { default: 'high', levels: ['low', 'high', 'max'] }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
 
+    const wrapper = mountModal(account)
+
+    expect(
+      (wrapper.get('[data-testid="reasoning-effort-override-model"]').element as HTMLInputElement)
+        .value
+    ).toBe('glm-5.3')
+    expect(
+      wrapper
+        .get('[data-testid="reasoning-effort-override-level-high"]')
+        .attributes('aria-pressed')
+    ).toBe('true')
+
+    await wrapper.get('[data-testid="reasoning-effort-override-level-medium"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(
+      updateAccountMock.mock.calls[0]?.[1]?.credentials?.reasoning_effort_overrides
+    ).toEqual({
+      'glm-5.3': { default: 'high', levels: ['low', 'medium', 'high', 'max'] }
+    })
+  })
 })

@@ -3087,6 +3087,16 @@
         <ModelDisplayNameEditor v-model:rows="modelDisplayNameRows" />
       </div>
 
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-2">
+          <label class="input-label mb-0">{{ t('admin.accounts.reasoningEffortOverride.title') }}</label>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.reasoningEffortOverride.description') }}
+          </p>
+        </div>
+        <ReasoningEffortOverrideEditor v-model:rows="reasoningEffortOverrideRows" />
+      </div>
+
       <UpstreamRequestIdHeaderField
         v-model="upstreamRequestIdHeader"
         :platform="form.platform"
@@ -4021,12 +4031,14 @@ import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import ModelDisplayNameEditor from '@/components/account/ModelDisplayNameEditor.vue'
+import ReasoningEffortOverrideEditor from '@/components/account/ReasoningEffortOverrideEditor.vue'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
   applyInterceptWarmup,
   applyModelDisplayNames,
+  applyReasoningEffortOverrides,
   applyOpenCodeGoProtocolRules,
   cloneOpenCodeGoProtocolRules,
   cnSupportsNativeResponses,
@@ -4044,12 +4056,14 @@ import {
   resolveProviderAccountMode,
   validateHeaderOverrideRows,
   validateModelDisplayNameRows,
+  validateReasoningEffortOverrideRows,
   type CnAccountMode,
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
   type HeaderOverrideRow,
   type ModelDisplayNameRow,
+  type ReasoningEffortOverrideRow,
   type OpenCodeAccountMode,
   type OpenCodeGoProtocolRule
 } from '@/components/account/credentialsBuilder'
@@ -4515,6 +4529,7 @@ const customErrorCodeInput = ref<number | null>(null)
 const headerOverrideEnabled = ref(false)
 const headerOverrideRows = ref<HeaderOverrideRow[]>([])
 const modelDisplayNameRows = ref<ModelDisplayNameRow[]>([])
+const reasoningEffortOverrideRows = ref<ReasoningEffortOverrideRow[]>([])
 
 // Grok OAuth：自定义上游地址（base_url 仅改写转发端点，OAuth 授权/刷新不受影响）
 const grokOAuthCustomBaseUrlEnabled = ref(false)
@@ -5051,6 +5066,7 @@ watch(
     headerOverrideEnabled.value = false
     headerOverrideRows.value = []
     modelDisplayNameRows.value = []
+    reasoningEffortOverrideRows.value = []
     openAIImagesUrlToB64JsonEnabled.value = false
     grokOAuthCustomBaseUrlEnabled.value = false
     grokOAuthBaseUrl.value = ''
@@ -5483,6 +5499,7 @@ const resetForm = () => {
   headerOverrideEnabled.value = false
   headerOverrideRows.value = []
   modelDisplayNameRows.value = []
+  reasoningEffortOverrideRows.value = []
   openAIImagesUrlToB64JsonEnabled.value = false
   grokOAuthCustomBaseUrlEnabled.value = false
   grokOAuthBaseUrl.value = ''
@@ -5673,7 +5690,15 @@ const doCreateAccount = async (payload: CreateAccountRequest) => {
     appStore.showError(t(`admin.accounts.modelDisplayName.${displayNameError}`))
     return
   }
+  const effortOverrideError = validateReasoningEffortOverrideRows(
+    reasoningEffortOverrideRows.value
+  )
+  if (effortOverrideError) {
+    appStore.showError(t(`admin.accounts.reasoningEffortOverride.${effortOverrideError}`))
+    return
+  }
   applyModelDisplayNames(payload.credentials, modelDisplayNameRows.value, 'create')
+  applyReasoningEffortOverrides(payload.credentials, reasoningEffortOverrideRows.value, 'create')
   const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
     await submitCreateAccount(payload)
   })
@@ -6082,10 +6107,18 @@ const createAccountAndFinish = async (
     appStore.showError(t(`admin.accounts.modelDisplayName.${displayNameError}`))
     return
   }
+  const effortOverrideError = validateReasoningEffortOverrideRows(
+    reasoningEffortOverrideRows.value
+  )
+  if (effortOverrideError) {
+    appStore.showError(t(`admin.accounts.reasoningEffortOverride.${effortOverrideError}`))
+    return
+  }
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
   applyModelDisplayNames(credentials, modelDisplayNameRows.value, 'create')
+  applyReasoningEffortOverrides(credentials, reasoningEffortOverrideRows.value, 'create')
   // Inject quota limits for apikey/bedrock accounts
   let finalExtra = withUpstreamRequestIdHeader(extra)
   if (type === 'apikey' || type === 'bedrock') {

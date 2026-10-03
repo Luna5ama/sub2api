@@ -211,6 +211,15 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 		}
 		changed = true
 	}
+	if displayNames := s.groupModelDisplayNameOverrides(ctx, group); len(displayNames) > 0 {
+		rewritten := RewriteModelDisplayNames(body, displayNames)
+		if len(rewritten) > 0 {
+			if !bytes.Equal(rewritten, body) {
+				changed = true
+			}
+			body = rewritten
+		}
+	}
 	if changed {
 		manifest.Body = body
 		manifest.ETag = codexModelsManifestBodyETag(body)
@@ -2447,7 +2456,12 @@ func completeAPIKeyCodexModelsManifestMetadata(body []byte, completeAll bool, ac
 
 		completeDescriptor := completeAll || isDeepSeekCodexModel(slug)
 		forceOfficialImage := officialOpenAI && isOpenAICodexImageInputModel(slug)
-		if !completeDescriptor && !forceOfficialImage {
+		capabilityModel := slug
+		if account != nil {
+			capabilityModel = account.GetMappedModel(slug)
+		}
+		override, hasOverride := account.ReasoningEffortOverrideFor(slug, capabilityModel)
+		if !completeDescriptor && !forceOfficialImage && !hasOverride {
 			continue
 		}
 
@@ -2469,12 +2483,17 @@ func completeAPIKeyCodexModelsManifestMetadata(body []byte, completeAll bool, ac
 			return nil, fmt.Errorf("decode default model %q: %w", slug, err)
 		}
 
-		capabilityModel := slug
-		if account != nil {
-			capabilityModel = account.GetMappedModel(slug)
-		}
 		capabilities := accountCodexToolCapabilities(account, capabilityModel)
 		modelChanged := applyCodexToolCapabilities(model, capabilities, false)
+		if hasOverride {
+			// A manual override is authoritative: it replaces whatever the
+			// upstream manifest advertised for this model's effort scale.
+			changed, err := applyReasoningEffortOverrideToModelFields(model, override)
+			if err != nil {
+				return nil, fmt.Errorf("apply reasoning effort override for %q: %w", slug, err)
+			}
+			modelChanged = modelChanged || changed
+		}
 		if completeDescriptor {
 			merged, err := mergeMissingCodexModelFields(model, defaults)
 			if err != nil {

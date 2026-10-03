@@ -904,6 +904,21 @@ export default {
         tooLong: 'Model id or display name is too long (max 200 characters)',
         tooManyEntries: 'Too many model display name entries (max 256)'
       },
+      reasoningEffortOverride: {
+        title: 'Reasoning Effort Override',
+        description: 'Declare which reasoning-effort levels this account upstream accepts. Overrides synced metadata and the built-in family defaults.',
+        hint: 'Leave a row empty to skip it. Models served by several accounts still intersect, so only levels every account accepts are advertised.',
+        modelPlaceholder: 'Model id (e.g. glm-5.3)',
+        addRow: 'Add Effort Override',
+        removeRow: 'Remove Effort Override',
+        defaultLevel: 'Default effort',
+        missingModel: 'Levels were selected without a model id',
+        duplicateModel: 'Duplicate model id (each model can only be declared once)',
+        tooLong: 'Model id is too long or too many levels were selected',
+        tooManyEntries: 'Too many effort override entries (max 256)',
+        noLevels: 'Select at least one effort level',
+        invalidDefault: 'The default effort must be one of the selected levels'
+      },
       grokCustomBaseUrl: {
         title: 'Custom Upstream URL',
         hint: 'When enabled, account traffic (chat/media/probes) is forwarded to the specified address. OAuth authorization and token refresh are unaffected and stay on the official endpoints.',

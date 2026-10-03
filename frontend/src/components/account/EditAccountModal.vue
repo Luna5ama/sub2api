@@ -1678,6 +1678,16 @@
         <ModelDisplayNameEditor v-model:rows="modelDisplayNameRows" />
       </div>
 
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-2">
+          <label class="input-label mb-0">{{ t('admin.accounts.reasoningEffortOverride.title') }}</label>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.reasoningEffortOverride.description') }}
+          </p>
+        </div>
+        <ReasoningEffortOverrideEditor v-model:rows="reasoningEffortOverrideRows" />
+      </div>
+
       <div v-if="!isSparkShadow">
         <div class="mb-1 flex items-center gap-2">
           <label class="input-label mb-0">{{ t('admin.accounts.proxy') }}</label>
@@ -3177,6 +3187,7 @@ import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import ModelDisplayNameEditor from '@/components/account/ModelDisplayNameEditor.vue'
+import ReasoningEffortOverrideEditor from '@/components/account/ReasoningEffortOverrideEditor.vue'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
 import {
   applyAntigravityProjectID,
@@ -3209,14 +3220,19 @@ import {
   HEADER_OVERRIDES_CREDENTIAL_KEY,
   MODEL_DISPLAY_NAMES_CREDENTIAL_KEY,
   applyModelDisplayNames,
+  applyReasoningEffortOverrides,
   parseModelDisplayNamesRows,
+  parseReasoningEffortOverrideRows,
   validateModelDisplayNameRows,
+  validateReasoningEffortOverrideRows,
+  REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY,
   type CnAccountMode,
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
   type HeaderOverrideRow,
   type ModelDisplayNameRow,
+  type ReasoningEffortOverrideRow,
   type OpenCodeAccountMode,
   type OpenCodeGoProtocolRule
 } from '@/components/account/credentialsBuilder'
@@ -3621,6 +3637,7 @@ const customErrorCodeInput = ref<number | null>(null)
 const headerOverrideEnabled = ref(false)
 const headerOverrideRows = ref<HeaderOverrideRow[]>([])
 const modelDisplayNameRows = ref<ModelDisplayNameRow[]>([])
+const reasoningEffortOverrideRows = ref<ReasoningEffortOverrideRow[]>([])
 
 const headerOverrideCapable = computed(
   () => !!props.account && isHeaderOverrideCapable(props.account.platform, props.account.type)
@@ -4392,10 +4409,16 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 
   // Load header override state for eligible account platforms/types
   modelDisplayNameRows.value = []
+  reasoningEffortOverrideRows.value = []
   if (newAccount.credentials) {
     const displayCreds = newAccount.credentials as Record<string, unknown>
     modelDisplayNameRows.value = parseModelDisplayNamesRows(
       displayCreds[MODEL_DISPLAY_NAMES_CREDENTIAL_KEY] as Record<string, unknown> | undefined
+    )
+    reasoningEffortOverrideRows.value = parseReasoningEffortOverrideRows(
+      displayCreds[REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY] as
+        | Record<string, unknown>
+        | undefined
     )
   }
 
@@ -5932,6 +5955,13 @@ const handleSubmit = async () => {
       appStore.showError(t(`admin.accounts.modelDisplayName.${displayNameError}`))
       return
     }
+    const effortOverrideError = validateReasoningEffortOverrideRows(
+      reasoningEffortOverrideRows.value
+    )
+    if (effortOverrideError) {
+      appStore.showError(t(`admin.accounts.reasoningEffortOverride.${effortOverrideError}`))
+      return
+    }
     {
       // Reuse credentials the earlier blocks already assembled. Spark shadow
       // accounts intentionally submit only the rebuilt mapping fields, so never
@@ -5941,6 +5971,11 @@ const handleSubmit = async () => {
         (isSparkShadow.value ? {} : ((props.account.credentials as Record<string, unknown>) || {}))
       const credentialsWithDisplayNames: Record<string, unknown> = { ...baseCredentials }
       applyModelDisplayNames(credentialsWithDisplayNames, modelDisplayNameRows.value, 'edit')
+      applyReasoningEffortOverrides(
+        credentialsWithDisplayNames,
+        reasoningEffortOverrideRows.value,
+        'edit'
+      )
       updatePayload.credentials = credentialsWithDisplayNames
     }
 

@@ -774,3 +774,152 @@ export function applyModelDisplayNames(
     delete credentials[MODEL_DISPLAY_NAMES_CREDENTIAL_KEY]
   }
 }
+
+// ========== Manual reasoning-effort capability override ==========
+
+export const REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY = 'reasoning_effort_overrides'
+
+/** Effort levels the backend accepts, in ascending order. */
+export const REASONING_EFFORT_LEVELS = [
+  { value: 'none', label: 'None' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+  { value: 'max', label: 'Max' },
+  { value: 'ultra', label: 'Ultra' }
+] as const
+
+export interface ReasoningEffortOverrideRow {
+  model: string
+  levels: string[]
+  defaultLevel: string
+}
+
+/** Backend limits; keep the two validators in sync. */
+const REASONING_EFFORT_OVERRIDE_MAX_ENTRIES = 256
+const REASONING_EFFORT_OVERRIDE_MAX_ID_LENGTH = 200
+const REASONING_EFFORT_OVERRIDE_MAX_LEVELS = 8
+
+const REASONING_EFFORT_LEVEL_SET = new Set<string>(
+  REASONING_EFFORT_LEVELS.map((level) => level.value)
+)
+
+const REASONING_EFFORT_LEVEL_ORDER = new Map<string, number>(
+  REASONING_EFFORT_LEVELS.map((level, index) => [level.value, index])
+)
+
+/** Order a level list by the canonical ascending scale and drop duplicates. */
+export function sortReasoningEffortLevels(levels: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const level of levels) {
+    const normalized = normalizeReasoningEffortLevel(level)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    result.push(normalized)
+  }
+  return result.sort(
+    (a, b) => (REASONING_EFFORT_LEVEL_ORDER.get(a) ?? 0) - (REASONING_EFFORT_LEVEL_ORDER.get(b) ?? 0)
+  )
+}
+
+export function normalizeReasoningEffortLevel(level: string): string {
+  const value = (level || '').trim().toLowerCase()
+  if (value === 'off' || value === 'disabled') return 'none'
+  if (value === 'extra-high' || value === 'extra_high') return 'xhigh'
+  return REASONING_EFFORT_LEVEL_SET.has(value) ? value : ''
+}
+
+/**
+ * Validate override rows. Returns an i18n error suffix or null when valid.
+ * Rows with an empty model are placeholders and skipped; a row is only
+ * meaningful when it declares at least one level.
+ */
+export function validateReasoningEffortOverrideRows(
+  rows: ReasoningEffortOverrideRow[]
+): 'missingModel' | 'duplicateModel' | 'tooLong' | 'tooManyEntries' | 'noLevels' | 'invalidDefault' | null {
+  const seen = new Set<string>()
+  let count = 0
+  for (const row of rows) {
+    const model = row.model.trim()
+    const levels = row.levels.map(normalizeReasoningEffortLevel).filter(Boolean)
+    if (!model) {
+      if (levels.length > 0) return 'missingModel'
+      continue
+    }
+    if (model.length > REASONING_EFFORT_OVERRIDE_MAX_ID_LENGTH) return 'tooLong'
+    if (levels.length === 0) continue
+    if (levels.length > REASONING_EFFORT_OVERRIDE_MAX_LEVELS) return 'tooLong'
+    if (seen.has(model)) return 'duplicateModel'
+    seen.add(model)
+    count += 1
+    if (normalizeReasoningEffortLevel(row.defaultLevel) && !levels.includes(normalizeReasoningEffortLevel(row.defaultLevel))) {
+      return 'invalidDefault'
+    }
+  }
+  if (count > REASONING_EFFORT_OVERRIDE_MAX_ENTRIES) return 'tooManyEntries'
+  return null
+}
+
+/** Build the reasoning_effort_overrides object. Empty rows are omitted. */
+export function buildReasoningEffortOverridesObject(
+  rows: ReasoningEffortOverrideRow[]
+): Record<string, { default: string; levels: string[] }> | null {
+  const result: Record<string, { default: string; levels: string[] }> = {}
+  for (const row of rows) {
+    const model = row.model.trim()
+    if (!model) continue
+    const levels = sortReasoningEffortLevels(row.levels)
+    if (levels.length === 0) continue
+    let defaultLevel = normalizeReasoningEffortLevel(row.defaultLevel)
+    if (!defaultLevel || !levels.includes(defaultLevel)) defaultLevel = levels[0]
+    result[model] = { default: defaultLevel, levels }
+  }
+  return Object.keys(result).length > 0 ? result : null
+}
+
+/** Parse a reasoning_effort_overrides object back into editable rows. */
+export function parseReasoningEffortOverrideRows(
+  value?: Record<string, unknown> | null
+): ReasoningEffortOverrideRow[] {
+  if (!value || typeof value !== 'object') return []
+  const rows: ReasoningEffortOverrideRow[] = []
+  for (const [model, rawEntry] of Object.entries(value)) {
+    if (!rawEntry || typeof rawEntry !== 'object') continue
+    const entry = rawEntry as Record<string, unknown>
+    const rawLevels = Array.isArray(entry.levels) ? entry.levels : []
+    const levels = sortReasoningEffortLevels(
+      rawLevels.filter((rawLevel): rawLevel is string => typeof rawLevel === 'string')
+    )
+    const trimmedModel = model.trim()
+    if (!trimmedModel && levels.length === 0) continue
+    const defaultLevel =
+      typeof entry.default === 'string' ? normalizeReasoningEffortLevel(entry.default) : ''
+    rows.push({
+      model: trimmedModel,
+      levels,
+      defaultLevel: defaultLevel && levels.includes(defaultLevel) ? defaultLevel : levels[0] || ''
+    })
+  }
+  return rows
+}
+
+/**
+ * Write reasoning_effort_overrides to credentials. Create mode keeps the
+ * credential untouched when disabled; edit mode deletes the field for a full
+ * replacement.
+ */
+export function applyReasoningEffortOverrides(
+  credentials: Record<string, unknown>,
+  rows: ReasoningEffortOverrideRow[],
+  mode: 'create' | 'edit'
+): void {
+  const object = buildReasoningEffortOverridesObject(rows)
+  if (object) {
+    credentials[REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY] = object
+  } else if (mode === 'edit') {
+    delete credentials[REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY]
+  }
+}

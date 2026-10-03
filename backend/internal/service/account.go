@@ -90,6 +90,13 @@ type Account struct {
 	modelDisplayNameCacheRawPtr         uintptr
 	modelDisplayNameCacheRawLen         int
 	modelDisplayNameCacheRawSig         uint64
+
+	reasoningEffortOverrideCache               map[string]ReasoningEffortOverride
+	reasoningEffortOverrideCacheReady          bool
+	reasoningEffortOverrideCacheCredentialsPtr uintptr
+	reasoningEffortOverrideCacheRawPtr         uintptr
+	reasoningEffortOverrideCacheRawLen         int
+	reasoningEffortOverrideCacheRawSig         uint64
 }
 
 type OpenAIEndpointCapability string

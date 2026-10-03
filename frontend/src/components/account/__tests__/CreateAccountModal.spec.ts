@@ -349,6 +349,26 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createAccountMock).not.toHaveBeenCalled()
   })
 
+  it('sends the reasoning effort override in credentials', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('openai account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="reasoning-effort-override-add"]').trigger('click')
+    await wrapper.get('[data-testid="reasoning-effort-override-model"]').setValue('glm-5.3')
+    await wrapper.get('[data-testid="reasoning-effort-override-level-low"]').trigger('click')
+    await wrapper.get('[data-testid="reasoning-effort-override-level-high"]').trigger('click')
+    await wrapper.get('[data-testid="reasoning-effort-override-level-max"]').trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.reasoning_effort_overrides).toEqual({
+      'glm-5.3': { default: 'low', levels: ['low', 'high', 'max'] }
+    })
+  })
+
   it('omits images_url_to_b64_json from extra by default', async () => {
     await submitApiKeyAccount('openai')
 

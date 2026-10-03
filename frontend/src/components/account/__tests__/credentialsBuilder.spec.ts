@@ -33,6 +33,12 @@ import {
   buildModelDisplayNamesObject,
   parseModelDisplayNamesRows,
   validateModelDisplayNameRows,
+  REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY,
+  applyReasoningEffortOverrides,
+  buildReasoningEffortOverridesObject,
+  normalizeReasoningEffortLevel,
+  parseReasoningEffortOverrideRows,
+  validateReasoningEffortOverrideRows
 } from '../credentialsBuilder'
 
 describe('applyInterceptWarmup', () => {
@@ -634,5 +640,85 @@ describe('model display name overrides', () => {
 
     applyModelDisplayNames(creds, [], 'edit')
     expect(MODEL_DISPLAY_NAMES_CREDENTIAL_KEY in creds).toBe(false)
+  })
+})
+
+describe('reasoning effort overrides', () => {
+  it('normalizes aliases and drops unknown levels', () => {
+    expect(normalizeReasoningEffortLevel(' off ')).toBe('none')
+    expect(normalizeReasoningEffortLevel('extra-high')).toBe('xhigh')
+    expect(normalizeReasoningEffortLevel('HIGH')).toBe('high')
+    expect(normalizeReasoningEffortLevel('turbo')).toBe('')
+  })
+
+  it('builds the credential object and falls back to the first level as default', () => {
+    expect(
+      buildReasoningEffortOverridesObject([
+        { model: ' glm-5.3 ', levels: ['low', 'high', 'max'], defaultLevel: 'high' },
+        { model: 'glm-5.3-flash', levels: ['off', 'HIGH', 'bogus'], defaultLevel: '' }
+      ])
+    ).toEqual({
+      'glm-5.3': { default: 'high', levels: ['low', 'high', 'max'] },
+      'glm-5.3-flash': { default: 'none', levels: ['none', 'high'] }
+    })
+    expect(buildReasoningEffortOverridesObject([{ model: '', levels: [], defaultLevel: '' }])).toBeNull()
+  })
+
+  it('parses stored objects back into editable rows', () => {
+    expect(
+      parseReasoningEffortOverrideRows({
+        'glm-5.3': { default: 'max', levels: ['low', 'high', 'max'] },
+        'deepseek/deepseek-v4.1-flash': { levels: ['off', 'high'] },
+        broken: 'nope'
+      })
+    ).toEqual([
+      { model: 'glm-5.3', levels: ['low', 'high', 'max'], defaultLevel: 'max' },
+      { model: 'deepseek/deepseek-v4.1-flash', levels: ['none', 'high'], defaultLevel: 'none' }
+    ])
+    expect(parseReasoningEffortOverrideRows(undefined)).toEqual([])
+  })
+
+  it('reports row validation problems', () => {
+    expect(validateReasoningEffortOverrideRows([])).toBeNull()
+    expect(
+      validateReasoningEffortOverrideRows([
+        { model: 'glm-5.3', levels: ['low', 'high'], defaultLevel: 'high' }
+      ])
+    ).toBeNull()
+    expect(
+      validateReasoningEffortOverrideRows([{ model: '', levels: ['high'], defaultLevel: 'high' }])
+    ).toBe('missingModel')
+    expect(
+      validateReasoningEffortOverrideRows([
+        { model: 'a', levels: ['low'], defaultLevel: 'low' },
+        { model: 'a', levels: ['high'], defaultLevel: 'high' }
+      ])
+    ).toBe('duplicateModel')
+    expect(
+      validateReasoningEffortOverrideRows([
+        { model: 'a', levels: ['low', 'high'], defaultLevel: 'max' }
+      ])
+    ).toBe('invalidDefault')
+  })
+
+  it('writes and clears the credential on edit', () => {
+    const createCreds: Record<string, unknown> = {}
+    applyReasoningEffortOverrides(createCreds, [], 'create')
+    expect(REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY in createCreds).toBe(false)
+
+    const creds: Record<string, unknown> = {
+      [REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY]: { stale: { levels: ['low'] } }
+    }
+    applyReasoningEffortOverrides(
+      creds,
+      [{ model: 'glm-5.3', levels: ['low', 'high', 'max'], defaultLevel: 'high' }],
+      'edit'
+    )
+    expect(creds[REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY]).toEqual({
+      'glm-5.3': { default: 'high', levels: ['low', 'high', 'max'] }
+    })
+
+    applyReasoningEffortOverrides(creds, [], 'edit')
+    expect(REASONING_EFFORT_OVERRIDES_CREDENTIAL_KEY in creds).toBe(false)
   })
 })
