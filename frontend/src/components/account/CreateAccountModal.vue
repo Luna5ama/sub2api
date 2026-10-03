@@ -3077,6 +3077,16 @@
         <ProxySelector v-model="form.proxy_id" :proxies="proxies" />
       </div>
 
+      <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-2">
+          <label class="input-label mb-0">{{ t('admin.accounts.modelDisplayName.title') }}</label>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.modelDisplayName.hint') }}
+          </p>
+        </div>
+        <ModelDisplayNameEditor v-model:rows="modelDisplayNameRows" />
+      </div>
+
       <UpstreamRequestIdHeaderField
         v-model="upstreamRequestIdHeader"
         :platform="form.platform"
@@ -4010,11 +4020,13 @@ import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
 import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
 import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
+import ModelDisplayNameEditor from '@/components/account/ModelDisplayNameEditor.vue'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
   applyInterceptWarmup,
+  applyModelDisplayNames,
   applyOpenCodeGoProtocolRules,
   cloneOpenCodeGoProtocolRules,
   cnSupportsNativeResponses,
@@ -4031,11 +4043,13 @@ import {
   providerRoutesByModel,
   resolveProviderAccountMode,
   validateHeaderOverrideRows,
+  validateModelDisplayNameRows,
   type CnAccountMode,
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
   type HeaderOverrideRow,
+  type ModelDisplayNameRow,
   type OpenCodeAccountMode,
   type OpenCodeGoProtocolRule
 } from '@/components/account/credentialsBuilder'
@@ -4500,6 +4514,7 @@ const selectedErrorCodes = ref<number[]>([])
 const customErrorCodeInput = ref<number | null>(null)
 const headerOverrideEnabled = ref(false)
 const headerOverrideRows = ref<HeaderOverrideRow[]>([])
+const modelDisplayNameRows = ref<ModelDisplayNameRow[]>([])
 
 // Grok OAuth：自定义上游地址（base_url 仅改写转发端点，OAuth 授权/刷新不受影响）
 const grokOAuthCustomBaseUrlEnabled = ref(false)
@@ -5035,6 +5050,7 @@ watch(
     // 避免上一平台的配置行被提交到新平台账号
     headerOverrideEnabled.value = false
     headerOverrideRows.value = []
+    modelDisplayNameRows.value = []
     openAIImagesUrlToB64JsonEnabled.value = false
     grokOAuthCustomBaseUrlEnabled.value = false
     grokOAuthBaseUrl.value = ''
@@ -5466,6 +5482,7 @@ const resetForm = () => {
   customErrorCodeInput.value = null
   headerOverrideEnabled.value = false
   headerOverrideRows.value = []
+  modelDisplayNameRows.value = []
   openAIImagesUrlToB64JsonEnabled.value = false
   grokOAuthCustomBaseUrlEnabled.value = false
   grokOAuthBaseUrl.value = ''
@@ -5651,6 +5668,12 @@ const buildAnthropicExtra = (base?: Record<string, unknown>): Record<string, unk
 
 // Helper function to create account with mixed channel warning handling
 const doCreateAccount = async (payload: CreateAccountRequest) => {
+  const displayNameError = validateModelDisplayNameRows(modelDisplayNameRows.value)
+  if (displayNameError) {
+    appStore.showError(t(`admin.accounts.modelDisplayName.${displayNameError}`))
+    return
+  }
+  applyModelDisplayNames(payload.credentials, modelDisplayNameRows.value, 'create')
   const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
     await submitCreateAccount(payload)
   })
@@ -6054,9 +6077,15 @@ const createAccountAndFinish = async (
   credentials: Record<string, unknown>,
   extra?: Record<string, unknown>
 ) => {
+  const displayNameError = validateModelDisplayNameRows(modelDisplayNameRows.value)
+  if (displayNameError) {
+    appStore.showError(t(`admin.accounts.modelDisplayName.${displayNameError}`))
+    return
+  }
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
+  applyModelDisplayNames(credentials, modelDisplayNameRows.value, 'create')
   // Inject quota limits for apikey/bedrock accounts
   let finalExtra = withUpstreamRequestIdHeader(extra)
   if (type === 'apikey' || type === 'bedrock') {

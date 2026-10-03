@@ -682,3 +682,95 @@ export function applyPlanType(
   }
   return credentials
 }
+
+// ========== Manual model display name override ==========
+
+export const MODEL_DISPLAY_NAMES_CREDENTIAL_KEY = 'model_display_names'
+
+export interface ModelDisplayNameRow {
+  model: string
+  displayName: string
+}
+
+/** Backend limit; keep the two validators in sync. */
+const MODEL_DISPLAY_NAME_MAX_ENTRIES = 256
+const MODEL_DISPLAY_NAME_MAX_ID_LENGTH = 200
+const MODEL_DISPLAY_NAME_MAX_VALUE_LENGTH = 200
+
+/**
+ * Validate display-name rows. Returns an i18n error suffix or null when valid.
+ * Rows with both fields empty are placeholders and skipped; a label without a
+ * model id is invalid, as are duplicate (case-sensitive) model ids.
+ */
+export function validateModelDisplayNameRows(
+  rows: ModelDisplayNameRow[]
+): 'missingModel' | 'duplicateModel' | 'tooLong' | 'tooManyEntries' | null {
+  const seen = new Set<string>()
+  let count = 0
+  for (const row of rows) {
+    const model = row.model.trim()
+    const displayName = row.displayName.trim()
+    if (!model) {
+      if (displayName) return 'missingModel'
+      continue
+    }
+    if (model.length > MODEL_DISPLAY_NAME_MAX_ID_LENGTH) return 'tooLong'
+    if (displayName.length > MODEL_DISPLAY_NAME_MAX_VALUE_LENGTH) return 'tooLong'
+    if (!displayName) continue
+    if (seen.has(model)) return 'duplicateModel'
+    seen.add(model)
+    count += 1
+  }
+  if (count > MODEL_DISPLAY_NAME_MAX_ENTRIES) return 'tooManyEntries'
+  return null
+}
+
+/**
+ * Build the model_display_names object. Empty labels are omitted so the
+ * built-in display name is preserved.
+ */
+export function buildModelDisplayNamesObject(
+  rows: ModelDisplayNameRow[]
+): Record<string, string> | null {
+  const result: Record<string, string> = {}
+  for (const row of rows) {
+    const model = row.model.trim()
+    const displayName = row.displayName.trim()
+    if (!model || !displayName) continue
+    result[model] = displayName
+  }
+  return Object.keys(result).length > 0 ? result : null
+}
+
+/** Parse a model_display_names object back into editable rows. */
+export function parseModelDisplayNamesRows(
+  value?: Record<string, unknown> | null
+): ModelDisplayNameRow[] {
+  if (!value || typeof value !== 'object') return []
+  const rows: ModelDisplayNameRow[] = []
+  for (const [model, displayName] of Object.entries(value)) {
+    if (typeof displayName !== 'string') continue
+    const trimmedModel = model.trim()
+    const trimmedDisplayName = displayName.trim()
+    if (!trimmedModel && !trimmedDisplayName) continue
+    rows.push({ model: trimmedModel, displayName: trimmedDisplayName })
+  }
+  return rows
+}
+
+/**
+ * Write model_display_names to credentials. Create mode keeps the credential
+ * untouched when disabled; edit mode deletes the field for a full replacement.
+ */
+export function applyModelDisplayNames(
+  credentials: Record<string, unknown>,
+  rows: ModelDisplayNameRow[],
+  mode: 'create' | 'edit'
+): void {
+  const object = buildModelDisplayNamesObject(rows)
+  if (object) {
+    credentials[MODEL_DISPLAY_NAMES_CREDENTIAL_KEY] = object
+  } else if (mode === 'edit') {
+    delete credentials[MODEL_DISPLAY_NAMES_CREDENTIAL_KEY]
+  }
+}

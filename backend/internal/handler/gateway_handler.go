@@ -1167,55 +1167,57 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	if platform == service.PlatformComposite {
 		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID, "", true)
+		displayNames := h.gatewayService.GetModelDisplayNameOverrides(c.Request.Context(), groupID, platform)
 		if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 			source := availableModels
 			if len(source) == 0 {
 				source = defaultModelIDsForPlatform(service.PlatformComposite)
 			}
-			writeAllowlistedModelsList(c, service.PlatformComposite, apiKey.Group.ModelAllowlist.FilterForListing(source))
+			writeAllowlistedModelsList(c, service.PlatformComposite, apiKey.Group.ModelAllowlist.FilterForListing(source), displayNames)
 			return
 		}
 		if len(availableModels) > 0 {
-			writeModelsList(c, service.PlatformComposite, availableModels)
+			writeModelsList(c, service.PlatformComposite, availableModels, displayNames)
 			return
 		}
-		writeModelsList(c, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite))
+		writeModelsList(c, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite), displayNames)
 		return
 	}
 
 	// Get available models from account configurations for the selected group platform.
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
+	displayNames := h.gatewayService.GetModelDisplayNameOverrides(c.Request.Context(), groupID, platform)
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 		source := modelListingSource(platform, availableModels, defaultModelIDsForPlatform(platform))
-		writeAllowlistedModelsList(c, platform, apiKey.Group.ModelAllowlist.FilterForListing(source))
+		writeAllowlistedModelsList(c, platform, apiKey.Group.ModelAllowlist.FilterForListing(source), displayNames)
 		return
 	}
 
 	if len(availableModels) > 0 {
-		writeModelsList(c, platform, availableModels)
+		writeModelsList(c, platform, availableModels, displayNames)
 		return
 	}
 
 	// Fallback to default models
 	if platform == service.PlatformOpenAI {
-		writeModelsListResponse(c, openai.DefaultModels)
+		writeModelsListResponseWithDisplayNames(c, openai.DefaultModels, displayNames)
 		return
 	}
 
 	if platform == service.PlatformGemini {
-		writeModelsListResponse(c, geminicli.DefaultModels)
+		writeModelsListResponseWithDisplayNames(c, geminicli.DefaultModels, displayNames)
 		return
 	}
 	if platform == service.PlatformGrok {
-		writeGrokModelsList(c, xai.DefaultModelIDs())
+		writeGrokModelsList(c, xai.DefaultModelIDs(), displayNames)
 		return
 	}
 	if platform == service.PlatformTypeSafe {
-		writeModelsList(c, platform, []string{typesafe.JevLatestModel})
+		writeModelsList(c, platform, []string{typesafe.JevLatestModel}, displayNames)
 		return
 	}
 
-	writeModelsListResponse(c, claude.DefaultModels)
+	writeModelsListResponseWithDisplayNames(c, claude.DefaultModels, displayNames)
 }
 
 // CodexModels returns the effective group model list using the manifest shape
@@ -1338,33 +1340,37 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	return models
 }
 
-func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
+func writeModelsList(c *gin.Context, platform string, modelIDs []string, displayNames map[string]string) {
 	if platform == service.PlatformOpenAI {
-		writeOpenAIModelsList(c, modelIDs)
+		writeOpenAIModelsList(c, modelIDs, displayNames)
 		return
 	}
 	if platform == service.PlatformGrok {
-		writeGrokModelsList(c, modelIDs)
+		writeGrokModelsList(c, modelIDs, displayNames)
 		return
 	}
 	models := make([]claude.Model, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
+		displayName := modelID
+		if override, ok := displayNames[modelID]; ok {
+			displayName = override
+		}
 		models = append(models, claude.Model{
 			ID:          modelID,
 			Type:        "model",
-			DisplayName: modelID,
+			DisplayName: displayName,
 			CreatedAt:   "2024-01-01T00:00:00Z",
 		})
 	}
 	writeModelsListResponse(c, models)
 }
 
-func writeAllowlistedModelsList(c *gin.Context, platform string, modelIDs []string) {
+func writeAllowlistedModelsList(c *gin.Context, platform string, modelIDs []string, displayNames map[string]string) {
 	if platform == service.PlatformOpenAI {
-		writeOpenAIModelsList(c, modelIDs)
+		writeOpenAIModelsList(c, modelIDs, displayNames)
 		return
 	}
-	writeModelsList(c, platform, modelIDs)
+	writeModelsList(c, platform, modelIDs, displayNames)
 }
 
 type grokReasoningEffortOption struct {
@@ -1380,7 +1386,7 @@ type grokModelListItem struct {
 	ReasoningEfforts        []grokReasoningEffortOption `json:"reasoningEfforts,omitempty"`
 }
 
-func writeGrokModelsList(c *gin.Context, modelIDs []string) {
+func writeGrokModelsList(c *gin.Context, modelIDs []string, displayNames map[string]string) {
 	defaults := xai.DefaultModels()
 	defaultsByID := make(map[string]xai.Model, len(defaults))
 	for _, model := range defaults {
@@ -1397,6 +1403,9 @@ func writeGrokModelsList(c *gin.Context, modelIDs []string) {
 				OwnedBy:     "xai",
 				DisplayName: modelID,
 			}
+		}
+		if override, ok := displayNames[modelID]; ok {
+			model.DisplayName = override
 		}
 		item := grokModelListItem{Model: model}
 		if grokModelSupportsConfigurableReasoning(modelID) {
@@ -1427,7 +1436,7 @@ func grokModelSupportsConfigurableReasoning(modelID string) bool {
 	}
 }
 
-func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
+func writeOpenAIModelsList(c *gin.Context, modelIDs []string, displayNames map[string]string) {
 	defaultsByID := make(map[string]openai.Model, len(openai.DefaultModels))
 	for _, model := range openai.DefaultModels {
 		defaultsByID[model.ID] = model
@@ -1436,8 +1445,15 @@ func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
 	models := make([]openai.Model, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
 		if model, ok := defaultsByID[modelID]; ok {
+			if override, ok := displayNames[modelID]; ok {
+				model.DisplayName = override
+			}
 			models = append(models, model)
 			continue
+		}
+		displayName := modelID
+		if override, ok := displayNames[modelID]; ok {
+			displayName = override
 		}
 		models = append(models, openai.Model{
 			ID:          modelID,
@@ -1445,7 +1461,7 @@ func writeOpenAIModelsList(c *gin.Context, modelIDs []string) {
 			Created:     1704067200,
 			OwnedBy:     "openai",
 			Type:        "model",
-			DisplayName: modelID,
+			DisplayName: displayName,
 		})
 	}
 	writeModelsListResponse(c, models)

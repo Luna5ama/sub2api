@@ -1833,4 +1833,52 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     expect(updateAccountMock).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+
+  it('loads existing manual model display names into the editor rows', async () => {
+    const account = buildAccount()
+    account.credentials.model_display_names = { 'deepseek-v4.1-flash': 'Deepseek v4.1 Flash' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+
+    expect((wrapper.get('[data-testid="model-display-name-model"]').element as HTMLInputElement).value)
+      .toBe('deepseek-v4.1-flash')
+    expect((wrapper.get('[data-testid="model-display-name-value"]').element as HTMLInputElement).value)
+      .toBe('Deepseek v4.1 Flash')
+  })
+
+  it('persists a manual model display name override on save', async () => {
+    const account = buildAccount()
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="model-display-name-add"]').trigger('click')
+    await wrapper.get('[data-testid="model-display-name-model"]').setValue('deepseek-v4.1-flash')
+    await wrapper.get('[data-testid="model-display-name-value"]').setValue('Deepseek v4.1 Flash')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_display_names).toEqual({
+      'deepseek-v4.1-flash': 'Deepseek v4.1 Flash'
+    })
+  })
+
+  it('clears the manual model display name override when rows are removed', async () => {
+    const account = buildAccount()
+    account.credentials.model_display_names = { 'deepseek-v4.1-flash': 'Deepseek v4.1 Flash' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="model-display-name-value"]').setValue('')
+    await wrapper.get('[data-testid="model-display-name-model"]').setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_display_names')
+  })
+
+
 })

@@ -233,6 +233,20 @@ func (s *OpenAIGatewayService) groupConfiguredCodexModelIDs(ctx context.Context,
 	return openAIConfiguredCodexModelIDsForGroup(accounts, group), nil
 }
 
+// groupModelDisplayNameOverrides merges per-account display-name overrides for
+// the group's schedulable accounts. A load error yields no overrides so the
+// manifest still renders with the provider-default labels.
+func (s *OpenAIGatewayService) groupModelDisplayNameOverrides(ctx context.Context, group *Group) map[string]string {
+	if s == nil || s.accountRepo == nil || group == nil {
+		return nil
+	}
+	accounts, err := s.accountRepo.ListSchedulableByGroupID(ctx, group.ID)
+	if err != nil {
+		return nil
+	}
+	return ModelDisplayNamesFromAccounts(accounts)
+}
+
 // loadCodexGroupCatalogAccounts separates picker membership from capability
 // intersection. visible accounts are currently schedulable and decide which
 // public aliases appear. catalog accounts are persistently enabled group
@@ -950,7 +964,15 @@ func buildCodexModelsManifestForAccounts(
 			modelMetadata[modelID] = metadata
 		}
 	}
-	return buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	displayNames := ModelDisplayNamesFromAccounts(accounts)
+	return buildCodexModelsManifestWithDisplayNames(
+		modelIDs,
+		imageInputModels,
+		searchToolModels,
+		metadataModels,
+		modelMetadata,
+		displayNames,
+	)
 }
 
 func buildCodexModelsManifest(
@@ -959,6 +981,17 @@ func buildCodexModelsManifest(
 	searchToolModels map[string]bool,
 	metadataModels map[string]string,
 	modelMetadata map[string]codexModelMetadataOverride,
+) ([]byte, error) {
+	return buildCodexModelsManifestWithDisplayNames(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata, nil)
+}
+
+func buildCodexModelsManifestWithDisplayNames(
+	modelIDs []string,
+	imageInputModels map[string]bool,
+	searchToolModels map[string]bool,
+	metadataModels map[string]string,
+	modelMetadata map[string]codexModelMetadataOverride,
+	displayNames map[string]string,
 ) ([]byte, error) {
 	seen := make(map[string]struct{}, len(modelIDs))
 	models := make([]json.RawMessage, 0, len(modelIDs))
@@ -992,6 +1025,9 @@ func buildCodexModelsManifest(
 		if metadataModelID != modelID {
 			descriptor.DisplayName = modelID
 			descriptor.Description = configuredCodexCustomDescription
+		}
+		if override, ok := displayNames[modelID]; ok {
+			descriptor.DisplayName = override
 		}
 		encoded, err := json.Marshal(descriptor)
 		if err != nil {

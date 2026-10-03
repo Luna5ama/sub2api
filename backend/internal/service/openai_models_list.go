@@ -326,6 +326,11 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 	if err != nil {
 		return nil, nil, err
 	}
+	if group != nil {
+		if displayNames := s.groupModelDisplayNameOverrides(ctx, group); len(displayNames) > 0 {
+			body = RewriteModelDisplayNames(body, displayNames)
+		}
+	}
 	response := &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}
 	return openAIModelsResponseForClient(response, ifNoneMatch), results[0].account, nil
 }

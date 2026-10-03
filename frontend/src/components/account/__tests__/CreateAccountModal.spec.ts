@@ -317,6 +317,38 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createAccountMock.mock.calls[0]?.[0]?.extra?.upstream_request_id_header).toBe('X-Oneapi-Request-Id')
   })
 
+  it('sends the manual model display name override in credentials', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('openai account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="model-display-name-add"]').trigger('click')
+    await wrapper.get('[data-testid="model-display-name-model"]').setValue('deepseek-v4.1-flash')
+    await wrapper.get('[data-testid="model-display-name-value"]').setValue('Deepseek v4.1 Flash')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_display_names).toEqual({
+      'deepseek-v4.1-flash': 'Deepseek v4.1 Flash'
+    })
+  })
+
+  it('blocks creation when a display name is entered without a model id', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('openai account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="model-display-name-add"]').trigger('click')
+    await wrapper.get('[data-testid="model-display-name-value"]').setValue('Deepseek v4.1 Flash')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).not.toHaveBeenCalled()
+  })
+
   it('omits images_url_to_b64_json from extra by default', async () => {
     await submitApiKeyAccount('openai')
 

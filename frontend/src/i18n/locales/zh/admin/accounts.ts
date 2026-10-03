@@ -994,6 +994,18 @@ export default {
         invalidValue: '请求头值不合法（不允许控制字符，长度不超过 8192）',
         tooManyEntries: '请求头覆写条目过多（最多 64 条）'
       },
+      modelDisplayName: {
+        title: '模型显示名覆写',
+        hint: '覆写模型在 /v1/models 和 Codex 模型选择器中的显示名。留空显示名则保留内置名称。',
+        modelPlaceholder: '模型 ID（例如 deepseek-v4.1-flash）',
+        displayNamePlaceholder: '显示名（例如 Deepseek v4.1 Flash）',
+        addRow: '添加显示名',
+        emptyValueHint: '显示名为空的行保留内置名称；模型 ID 为空的行会被忽略。',
+        missingModel: '填写了显示名但未填写模型 ID',
+        duplicateModel: '模型 ID 重复（每个模型只能映射一次）',
+        tooLong: '模型 ID 或显示名过长（最多 200 字符）',
+        tooManyEntries: '模型显示名条目过多（最多 256 条）'
+      },
       grokCustomBaseUrl: {
         title: '自定义上游地址',
         hint: '开启后账号流量（对话/媒体/探测）改发指定地址；OAuth 授权与令牌刷新不受影响，仍走官方端点。',

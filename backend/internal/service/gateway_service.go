@@ -1482,6 +1482,35 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	return cloneStringSlice(models)
 }
 
+// GetModelDisplayNameOverrides merges the per-account display-name overrides
+// that apply to a model listing for the target group/platform. Accounts are
+// ordered by id so the first account defining a model id wins.
+func (s *GatewayService) GetModelDisplayNameOverrides(ctx context.Context, groupID *int64, platform string) map[string]string {
+	if s == nil || s.accountRepo == nil {
+		return nil
+	}
+	var accounts []Account
+	var err error
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	if platform != "" {
+		filtered := make([]Account, 0, len(accounts))
+		for _, acc := range accounts {
+			if acc.Platform == platform || mixedListingAccountAllowed(platform, &acc) {
+				filtered = append(filtered, acc)
+			}
+		}
+		accounts = filtered
+	}
+	return ModelDisplayNamesFromAccounts(accounts)
+}
+
 func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, groupID int64, model string) (CompositeModelOwnership, error) {
 	model = strings.TrimSpace(model)
 	if s == nil || s.accountRepo == nil || groupID <= 0 || model == "" {

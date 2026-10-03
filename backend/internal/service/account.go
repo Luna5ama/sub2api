@@ -83,6 +83,13 @@ type Account struct {
 	headerOverrideCacheRawPtr         uintptr
 	headerOverrideCacheRawLen         int
 	headerOverrideCacheRawSig         uint64
+
+	modelDisplayNameCache               map[string]string
+	modelDisplayNameCacheReady          bool
+	modelDisplayNameCacheCredentialsPtr uintptr
+	modelDisplayNameCacheRawPtr         uintptr
+	modelDisplayNameCacheRawLen         int
+	modelDisplayNameCacheRawSig         uint64
 }
 
 type OpenAIEndpointCapability string

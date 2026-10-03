@@ -892,6 +892,18 @@ export default {
         invalidValue: 'Invalid header value (control characters are not allowed; max length 8192)',
         tooManyEntries: 'Too many header override entries (max 64)'
       },
+      modelDisplayName: {
+        title: 'Model Display Name Override',
+        hint: 'Override how a model id is shown in /v1/models and the Codex model picker. Leave the label empty to keep the built-in name.',
+        modelPlaceholder: 'Model id (e.g. deepseek-v4.1-flash)',
+        displayNamePlaceholder: 'Display name (e.g. Deepseek v4.1 Flash)',
+        addRow: 'Add Display Name',
+        emptyValueHint: 'Rows without a display name keep the built-in name; rows without a model id are ignored.',
+        missingModel: 'A display name was entered without a model id',
+        duplicateModel: 'Duplicate model id (each model can only be mapped once)',
+        tooLong: 'Model id or display name is too long (max 200 characters)',
+        tooManyEntries: 'Too many model display name entries (max 256)'
+      },
       grokCustomBaseUrl: {
         title: 'Custom Upstream URL',
         hint: 'When enabled, account traffic (chat/media/probes) is forwarded to the specified address. OAuth authorization and token refresh are unaffected and stay on the official endpoints.',

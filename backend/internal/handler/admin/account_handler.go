@@ -2838,11 +2838,15 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 				}
 			}
 			if !found {
+				displayName := requestedModel
+				if override, ok := account.ModelDisplayNameOverride(requestedModel); ok {
+					displayName = override
+				}
 				models = append(models, openai.Model{
 					ID:          requestedModel,
 					Object:      "model",
 					Type:        "model",
-					DisplayName: requestedModel,
+					DisplayName: displayName,
 				})
 			}
 		}
@@ -2882,10 +2886,14 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 				}
 			}
 			if !found {
+				displayName := requestedModel
+				if override, ok := account.ModelDisplayNameOverride(requestedModel); ok {
+					displayName = override
+				}
 				models = append(models, geminicli.Model{
 					ID:          requestedModel,
 					Type:        "model",
-					DisplayName: requestedModel,
+					DisplayName: displayName,
 					CreatedAt:   "",
 				})
 			}
@@ -2986,10 +2994,14 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		}
 		// If not found in defaults, create a basic entry
 		if !found {
+			displayName := requestedModel
+			if override, ok := account.ModelDisplayNameOverride(requestedModel); ok {
+				displayName = override
+			}
 			models = append(models, claude.Model{
 				ID:          requestedModel,
 				Type:        "model",
-				DisplayName: requestedModel,
+				DisplayName: displayName,
 				CreatedAt:   "",
 			})
 		}

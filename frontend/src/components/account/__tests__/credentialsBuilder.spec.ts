@@ -27,7 +27,12 @@ import {
   readPlanType,
   serializeHeaderOverrideRows,
   splitHeaderOverridesObject,
-  validateHeaderOverrideRows
+  validateHeaderOverrideRows,
+  MODEL_DISPLAY_NAMES_CREDENTIAL_KEY,
+  applyModelDisplayNames,
+  buildModelDisplayNamesObject,
+  parseModelDisplayNamesRows,
+  validateModelDisplayNameRows,
 } from '../credentialsBuilder'
 
 describe('applyInterceptWarmup', () => {
@@ -575,5 +580,59 @@ describe('Codex subscription analytics labels', () => {
     ['unknown', 'Account'], ['promax', 'Pro 500']
   ])('groups %s without changing its status label', (sku, label) => {
     expect(openAIPlanTypeLabel(sku, 'analytics')).toBe(label)
+  })
+})
+
+describe('model display name overrides', () => {
+  it('builds an object and trims values', () => {
+    expect(
+      buildModelDisplayNamesObject([
+        { model: ' deepseek-v4.1-flash ', displayName: ' Deepseek v4.1 Flash ' },
+        { model: 'ignored', displayName: '' }
+      ])
+    ).toEqual({ 'deepseek-v4.1-flash': 'Deepseek v4.1 Flash' })
+  })
+
+  it('returns null when there are no usable rows', () => {
+    expect(buildModelDisplayNamesObject([{ model: '', displayName: '' }])).toBeNull()
+  })
+
+  it('validates rows', () => {
+    expect(validateModelDisplayNameRows([])).toBeNull()
+    expect(validateModelDisplayNameRows([{ model: '', displayName: 'x' }])).toBe('missingModel')
+    expect(
+      validateModelDisplayNameRows([
+        { model: 'm', displayName: 'a' },
+        { model: 'm', displayName: 'b' }
+      ])
+    ).toBe('duplicateModel')
+    expect(validateModelDisplayNameRows([{ model: '', displayName: '' }])).toBeNull()
+  })
+
+  it('parses values back into rows', () => {
+    expect(parseModelDisplayNamesRows({ 'm1': 'Label 1', 'm2': 'Label 2' })).toEqual([
+      { model: 'm1', displayName: 'Label 1' },
+      { model: 'm2', displayName: 'Label 2' }
+    ])
+    expect(parseModelDisplayNamesRows(undefined)).toEqual([])
+  })
+
+  it('applies and clears the credential on edit', () => {
+    const createCreds: Record<string, unknown> = {}
+    applyModelDisplayNames(createCreds, [], 'create')
+    expect(MODEL_DISPLAY_NAMES_CREDENTIAL_KEY in createCreds).toBe(false)
+
+    const creds: Record<string, unknown> = { [MODEL_DISPLAY_NAMES_CREDENTIAL_KEY]: { old: 'old' } }
+    applyModelDisplayNames(
+      creds,
+      [{ model: 'deepseek-v4.1-flash', displayName: 'Deepseek v4.1 Flash' }],
+      'edit'
+    )
+    expect(creds[MODEL_DISPLAY_NAMES_CREDENTIAL_KEY]).toEqual({
+      'deepseek-v4.1-flash': 'Deepseek v4.1 Flash'
+    })
+
+    applyModelDisplayNames(creds, [], 'edit')
+    expect(MODEL_DISPLAY_NAMES_CREDENTIAL_KEY in creds).toBe(false)
   })
 })

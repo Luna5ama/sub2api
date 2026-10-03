@@ -77,6 +77,27 @@ func writeModelsListResponse(c *gin.Context, models any) {
 	writeRetrievedModel(c, body)
 }
 
+// writeModelsListResponseWithDisplayNames renders a model list and overlays
+// per-account display-name overrides before writing. It reuses the same
+// envelope so the single-model retrieval path keeps working.
+func writeModelsListResponseWithDisplayNames(c *gin.Context, models any, displayNames map[string]string) {
+	if len(displayNames) == 0 {
+		writeModelsListResponse(c, models)
+		return
+	}
+	body, err := json.Marshal(gin.H{"object": "list", "data": models})
+	if err != nil {
+		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", "Failed to encode model catalogue")
+		return
+	}
+	body = service.RewriteModelDisplayNames(body, displayNames)
+	if c.Param("model") != "" {
+		writeRetrievedModel(c, body)
+		return
+	}
+	c.Data(http.StatusOK, "application/json", body)
+}
+
 func writeRetrievedModel(c *gin.Context, body []byte) {
 	var catalog struct {
 		Data []json.RawMessage `json:"data"`

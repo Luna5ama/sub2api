@@ -210,6 +210,9 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 		if strings.TrimSpace(model.DisplayName) == "" {
 			model.DisplayName = openaiCodexDisplayName(model.ID)
 		}
+		if override, ok := account.ModelDisplayNameOverride(model.ID); ok {
+			model.DisplayName = override
+		}
 		if strings.TrimSpace(model.Type) == "" {
 			model.Type = "model"
 		}
