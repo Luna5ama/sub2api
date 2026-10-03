@@ -92,6 +92,15 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
+	// Codex remote compaction v2 arrives on the plain /responses wire with a
+	// trailing compaction_trigger input item and stream:true. Detect it here so
+	// the Anthropic bridge folds the summarisation turn into a single
+	// compaction item instead of returning ordinary message items Codex
+	// rejects ("expected exactly one compaction output item").
+	if gatewayResponsesIsNativeCompactionV2(c, body) {
+		service.MarkOpenAINativeCompactionV2(c)
+	}
+
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	requestCtx := c.Request.Context()
@@ -417,4 +426,25 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		return
 	}
 	h.responsesErrorResponse(c, status, code, message)
+}
+
+// gatewayResponsesIsNativeCompactionV2 mirrors the OpenAI gateway's
+// isOpenAIRemoteCompactionV2Request gate for the Anthropic-platform Responses
+// bridge: a bare /responses path, stream:true, and a trailing
+// compaction_trigger input item. The OpenAI-compatible platforms route to
+// OpenAIGateway.Responses and mark themselves; this covers the group platforms
+// that fall through to GatewayHandler.Responses (for example Anthropic
+// accounts reached through a composite group).
+func gatewayResponsesIsNativeCompactionV2(c *gin.Context, body []byte) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	normalizedPath := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	switch normalizedPath {
+	case EndpointResponses, "/openai/v1/responses", "/responses", "/backend-api/codex/responses":
+	default:
+		return false
+	}
+	stream, valid := parseOpenAICompatibleStream(body)
+	return valid && stream && service.HasCompactionTriggerInInput(body)
 }

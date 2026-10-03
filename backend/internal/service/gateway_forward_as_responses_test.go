@@ -618,6 +618,115 @@ func TestHandleResponsesBufferedStreamingResponse_CompactSSEFormat(t *testing.T)
 	require.Equal(t, 5, result.Usage.OutputTokens)
 }
 
+// codexCompactionBridgeStream is an ordinary Anthropic text turn: the shape an
+// upstream returns when it ignores compaction_trigger and just answers the
+// summarisation prompt.
+func codexCompactionBridgeStream() string {
+	return strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_compact","type":"message","role":"assistant","content":[],"model":"claude-opus-5-5","usage":{"input_tokens":12,"output_tokens":6}}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<summary>continue from here</summary>"}}`,
+		"",
+		"event: content_block_stop",
+		`data: {"type":"content_block_stop","index":0}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n")
+}
+
+func TestHandleResponsesBufferedStreamingResponse_CompactionV2EmitsSingleItem(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	MarkOpenAINativeCompactionV2(c)
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_compact_v2"}},
+		Body:   io.NopCloser(strings.NewReader(codexCompactionBridgeStream())),
+	}
+
+	svc := &GatewayService{}
+	result, err := svc.handleResponsesBufferedStreamingResponse(
+		resp, c, "claude-opus-5-5", "claude-opus-5-5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	body := rec.Body.String()
+	output := gjson.Get(body, "output")
+	require.True(t, output.IsArray(), "output must be an array: %s", body)
+	require.Len(t, output.Array(), 1, "compaction v2 must yield exactly one output item: %s", body)
+	require.Equal(t, "compaction", output.Array()[0].Get("type").String())
+	require.Equal(t, "claude-opus-5-5", gjson.Get(body, "model").String())
+	require.Contains(t, output.Array()[0].Get("encrypted_content").String(), "sub2api-plaintext-v1:")
+	require.NotContains(t, body, `"type":"message"`)
+	require.NotContains(t, body, `"type":"reasoning"`)
+}
+
+func TestHandleResponsesStreamingResponse_CompactionV2EmitsSingleItem(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	MarkOpenAINativeCompactionV2(c)
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_compact_v2_stream"}},
+		Body:   io.NopCloser(strings.NewReader(codexCompactionBridgeStream())),
+	}
+
+	svc := &GatewayService{}
+	result, err := svc.handleResponsesStreamingResponse(
+		context.Background(), nil, resp, c, "claude-opus-5-5", "claude-opus-5-5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	body := rec.Body.String()
+	require.Contains(t, body, "response.completed")
+	require.Contains(t, body, `"type":"compaction"`)
+	require.Contains(t, body, "sub2api-plaintext-v1:")
+	require.NotContains(t, body, `"type":"message"`)
+	require.NotContains(t, body, `"type":"reasoning"`)
+	require.NotContains(t, body, "response.output_text.delta")
+}
+
+func TestHandleResponsesBufferedStreamingResponse_OrdinaryTurnKeepsMessageItem(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_ordinary"}},
+		Body:   io.NopCloser(strings.NewReader(codexCompactionBridgeStream())),
+	}
+
+	svc := &GatewayService{}
+	_, err := svc.handleResponsesBufferedStreamingResponse(
+		resp, c, "claude-opus-5-5", "claude-opus-5-5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	require.NoError(t, err)
+
+	body := rec.Body.String()
+	require.Contains(t, body, `"type":"message"`)
+	require.NotContains(t, body, `"type":"compaction"`)
+}
+
 func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)

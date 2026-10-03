@@ -53,3 +53,48 @@ func TestFinalizeAnthropicResponsesStreamCompactionOnlyEmitsSingleItem(t *testin
 		t.Fatalf("summary = %q, ok=%v", summary, ok)
 	}
 }
+
+// A compaction turn must emit no visible reasoning events even when the
+// upstream streams thinking deltas alongside its answer; Codex accepts only the
+// synthesized compaction item.
+func TestAnthropicCompactionOnlySuppressesThinkingDeltas(t *testing.T) {
+	state := NewAnthropicEventToResponsesState()
+	state.CompactionOnly = true
+	AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &AnthropicResponse{
+			ID:    "msg_1",
+			Model: "claude-opus-5-5",
+		},
+	}, state)
+	AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:         "content_block_start",
+		ContentBlock: &AnthropicContentBlock{Type: "thinking", Thinking: ""},
+	}, state)
+	events := AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type: "content_block_delta",
+		Delta: &AnthropicDelta{
+			Type:     "thinking_delta",
+			Thinking: "secret chain of thought",
+		},
+	}, state)
+	if len(events) != 0 {
+		t.Fatalf("thinking delta leaked %#v", events)
+	}
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type: "content_block_delta",
+		Delta: &AnthropicDelta{
+			Type: "text_delta",
+			Text: "<summary>continue</summary>",
+		},
+	}, state)
+	if len(events) != 0 {
+		t.Fatalf("text delta leaked %#v", events)
+	}
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "message_stop"}, state)
+	for _, event := range events {
+		if strings.Contains(event.Type, "delta") {
+			t.Fatalf("unexpected delta event %q", event.Type)
+		}
+	}
+}

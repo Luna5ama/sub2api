@@ -523,6 +523,13 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 		finalResp.Model = mappedModel
 	}
 	responsesResp := apicompat.AnthropicToResponsesResponse(finalResp)
+	if IsOpenAINativeCompactionV2(c) {
+		// Codex remote-compaction v2 accepts exactly one compaction item. An
+		// Anthropic upstream answers the summarisation prompt with an ordinary
+		// message, so fold that text into the gateway's plaintext compaction
+		// envelope instead of returning reasoning/message items Codex rejects.
+		responsesResp = apicompat.AnthropicResponseToCodexCompactionResponse(finalResp)
+	}
 	responsesResp.Model = originalModel // Use original model name
 
 	if s.responseHeaderFilter != nil {
@@ -584,6 +591,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	state := apicompat.NewAnthropicEventToResponsesState()
 	state.Model = originalModel
 	state.PreserveThinkingSignatures = isClaude55SignedThinkingModel(mappedModel)
+	state.CompactionOnly = IsOpenAINativeCompactionV2(c)
 	clientToolRestorer := apicompat.NewResponsesClientToolStreamRestorer(clientToolMapping)
 	var usage ClaudeUsage
 	var firstTokenMs *int

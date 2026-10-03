@@ -519,6 +519,12 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 			return nil
 		}
 		state.CurrentSummary += evt.Delta.Thinking
+		if state.CompactionOnly {
+			// A compaction turn must not surface reasoning events. The private
+			// thinking still accumulates in CurrentSummary but never reaches the
+			// client; only the synthesized compaction item is emitted.
+			return nil
+		}
 		return []ResponsesStreamEvent{makeResponsesEvent(state, "response.reasoning_summary_text.delta", &ResponsesStreamEvent{
 			OutputIndex:  state.OutputIndex,
 			SummaryIndex: 0,
