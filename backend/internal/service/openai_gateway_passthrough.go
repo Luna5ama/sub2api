@@ -1857,6 +1857,20 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	originalModel string,
 	mappedModel string,
 ) (*openaiStreamingResultPassthrough, error) {
+	if shouldRewriteCodexCompactionStream(c, account) {
+		payload, responseID, usage, elapsed, handled, err := s.bufferCodexCompactionStreamRewrite(resp, c, account, startTime, originalModel)
+		if handled {
+			if err != nil {
+				return nil, err
+			}
+			if _, writeErr := c.Writer.Write(payload); writeErr != nil {
+				return nil, writeErr
+			}
+			c.Writer.Flush()
+			firstTokenMs := elapsed
+			return &openaiStreamingResultPassthrough{usage: usage, firstTokenMs: &firstTokenMs, responseID: responseID}, nil
+		}
+	}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)

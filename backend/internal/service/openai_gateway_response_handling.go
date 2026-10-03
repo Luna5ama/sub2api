@@ -49,6 +49,12 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel, reasoningEffort string) (*openaiStreamingResult, error) {
+	if shouldRewriteCodexCompactionStream(c, account) {
+		result, err, handled := s.handleCodexCompactionStreamRewrite(ctx, resp, c, account, startTime, originalModel)
+		if handled {
+			return result, err
+		}
+	}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)

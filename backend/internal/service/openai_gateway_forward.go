@@ -273,6 +273,27 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, mappedModel)
 		// 国产模型默认 effort 补充：也要用 mappedModel 判定是否是 passback-required 上游。
 		reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, mappedModel)
+		// The passthrough branch returns before the shared rewrite below, so
+		// apply the same non-native compaction reshaping here.
+		if shouldRewriteCodexCompactionStream(c, account) {
+			rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body)
+			if rewriteErr != nil {
+				return nil, fmt.Errorf("rewrite codex compaction trigger: %w", rewriteErr)
+			}
+			if changed {
+				body = rewrittenBody
+				originalBody = rewrittenBody
+			}
+		} else if shouldRewriteCodexCompactionRequestForUpstream(account) {
+			rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+			if rewriteErr != nil {
+				return nil, fmt.Errorf("rewrite replayed codex compaction summary: %w", rewriteErr)
+			}
+			if changed {
+				body = rewrittenBody
+				originalBody = rewrittenBody
+			}
+		}
 		return s.forwardOpenAIPassthrough(
 			ctx,
 			c,
@@ -734,6 +755,32 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		body = normalizedBody
 		requestView = newOpenAIRequestView(body)
 		reqBody = nil
+	}
+	// A non-native upstream ignores compaction_trigger and cannot read the
+	// gateway plaintext compaction items, so hand it the same summary task the
+	// bridged paths use. The response side rewrites the answer back.
+	if shouldRewriteCodexCompactionStream(c, account) {
+		rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body)
+		if rewriteErr != nil {
+			return nil, fmt.Errorf("rewrite codex compaction trigger: %w", rewriteErr)
+		}
+		if changed {
+			body = rewrittenBody
+			requestView = newOpenAIRequestView(body)
+			reqBody = nil
+		}
+	} else if shouldRewriteCodexCompactionRequestForUpstream(account) {
+		// Later turns replay the gateway plaintext compaction item without a
+		// trigger; the upstream still cannot read the item type itself.
+		rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+		if rewriteErr != nil {
+			return nil, fmt.Errorf("rewrite replayed codex compaction summary: %w", rewriteErr)
+		}
+		if changed {
+			body = rewrittenBody
+			requestView = newOpenAIRequestView(body)
+			reqBody = nil
+		}
 	}
 	// 剥离本会话已被上游判定失效的加密项（invalid_encrypted_content lineage），
 	// 阻断同一失效密文随客户端历史在每一轮重复触发"被拒→剥离→重试/重连"。
