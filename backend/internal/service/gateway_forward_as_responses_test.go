@@ -5,8 +5,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +12,102 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
+
+func TestHandleResponsesStreamingResponse_IdleTimeoutStopsHungStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	// Upstream sends one event, then stalls forever without closing the body.
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = io.WriteString(pw, strings.Join([]string{
+			"event: message_start",
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_idle\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"stop_reason\":\"\",\"usage\":{\"input_tokens\":12}}}",
+			"",
+			"",
+		}, "\n"))
+	}()
+	defer func() { _ = pw.Close() }()
+
+	resp := &http.Response{
+		Header: http.Header{"x-request-id": []string{"rid_idle"}},
+		Body:   pr,
+	}
+	svc := &GatewayService{cfg: &config.Config{}}
+	svc.cfg.Gateway.StreamDataIntervalTimeout = 1
+
+	start := time.Now()
+	_, err := svc.handleResponsesStreamingResponse(context.Background(), nil, resp, c, "claude-opus-5-5", "claude-opus-5-5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	require.Error(t, err)
+	require.ErrorIs(t, err, errAnthropicNativeStreamIdle)
+	require.Less(t, time.Since(start), 5*time.Second)
+}
+
+// The Responses bridge rebuilds Anthropic messages on every turn, so the
+// breakpoint chain has to survive that rebuild: a turn that appends the
+// assistant reply plus the next user message must still re-declare the anchor
+// left by the previous turn, and the tail anchor must land on the newest turn.
+func TestResponsesAnthropicCacheBreakpoints_ChainSurvivesRebuild(t *testing.T) {
+	t.Parallel()
+
+	rebuild := func(messages string) []byte {
+		body := []byte(`{"system":[{"type":"text","text":"billing","cache_control":{"type":"ephemeral","ttl":"5m"}}],"tools":[{"name":"t1"},{"name":"t2","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":` + messages + `}`)
+		return addResponsesAnthropicCacheBreakpoints(body)
+	}
+
+	// Turn 1: a single user message. Only the tail anchor exists.
+	turn1 := rebuild(`[{"role":"user","content":[{"type":"text","text":"q1"}]}]`)
+	require.Equal(t, "ephemeral", gjson.GetBytes(turn1, "messages.0.content.0.cache_control.type").String())
+
+	// Turn 2: the previous turn's tail position is now the element before the
+	// appended assistant reply, so it must be re-declared as the history anchor.
+	turn2 := rebuild(`[{"role":"user","content":[{"type":"text","text":"q1"}]},{"role":"assistant","content":"a1"},{"role":"user","content":[{"type":"text","text":"q2"}]}]`)
+	require.Equal(t, "ephemeral", gjson.GetBytes(turn2, "messages.0.content.0.cache_control.type").String())
+	require.Equal(t, "ephemeral", gjson.GetBytes(turn2, "messages.2.content.0.cache_control.type").String())
+	require.False(t, gjson.GetBytes(turn2, "messages.1.content.0.cache_control").Exists())
+
+	// Turn 3 keeps chaining: [u1,a1,u2,a2,u3] anchors on u3 (tail) and u2.
+	turn3 := rebuild(`[{"role":"user","content":[{"type":"text","text":"q1"}]},{"role":"assistant","content":"a1"},{"role":"user","content":[{"type":"text","text":"q2"}]},{"role":"assistant","content":"a2"},{"role":"user","content":[{"type":"text","text":"q3"}]}]`)
+	require.Equal(t, true, gjson.GetBytes(turn3, "messages.2.content.0.cache_control").Exists())
+	require.Equal(t, "ephemeral", gjson.GetBytes(turn3, "messages.4.content.0.cache_control.type").String())
+
+	// Anchors must stay within Anthropic's 4-block ceiling after the bridge adds
+	// the system and tools anchors.
+	for _, body := range [][]byte{turn1, turn2, turn3} {
+		limited := enforceCacheControlLimit(body)
+		count := 0
+		gjson.ParseBytes(limited).Get("system").ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+		gjson.ParseBytes(limited).Get("tools").ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+		gjson.ParseBytes(limited).Get("messages").ForEach(func(_, msg gjson.Result) bool {
+			msg.Get("content").ForEach(func(_, item gjson.Result) bool {
+				if item.Get("cache_control").Exists() {
+					count++
+				}
+				return true
+			})
+			return true
+		})
+		require.LessOrEqual(t, count, maxCacheControlBlocks)
+	}
+}
 
 func TestAdaptResponsesClientToolsForAnthropic_FlattensNamespace(t *testing.T) {
 	t.Parallel()
@@ -207,7 +297,7 @@ func TestHandleResponsesStreamingResponse_RestoresNamespaceTool(t *testing.T) {
 	resp := &http.Response{Body: io.NopCloser(strings.NewReader(namespaceToolAnthropicStream()))}
 
 	svc := &GatewayService{}
-	_, err := svc.handleResponsesStreamingResponse(resp, c, "claude-fable-5", "claude-fable-5", nil, time.Now(), namespaceToolMapping())
+	_, err := svc.handleResponsesStreamingResponse(context.Background(), nil, resp, c, "claude-fable-5", "claude-fable-5", nil, time.Now(), namespaceToolMapping())
 	require.NoError(t, err)
 	require.Contains(t, rec.Body.String(), `response.output_item.added`)
 	require.Contains(t, rec.Body.String(), `"name":"read_thread"`)
@@ -300,7 +390,7 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	result, err := svc.handleResponsesStreamingResponse(context.Background(), nil, resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 20, result.Usage.InputTokens)
@@ -387,7 +477,7 @@ func TestHandleResponsesStreamingResponse_NormalizesTerminalUsage(t *testing.T) 
 				}
 				resp := &http.Response{Body: io.NopCloser(strings.NewReader(strings.Join(lines, "\n")))}
 
-				result, err := (&GatewayService{}).handleResponsesStreamingResponse(resp, c, "k3", "k3", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+				result, err := (&GatewayService{}).handleResponsesStreamingResponse(context.Background(), nil, resp, c, "k3", "k3", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 				require.NoError(t, err)
 				require.Equal(t, tt.wantInput, result.Usage.InputTokens)
 				require.Equal(t, tt.wantCached, result.Usage.CacheReadInputTokens)
@@ -555,7 +645,7 @@ func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 	}
 
 	svc := &GatewayService{}
-	result, err := svc.handleResponsesStreamingResponse(resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	result, err := svc.handleResponsesStreamingResponse(context.Background(), nil, resp, c, "claude-sonnet-4.5", "claude-sonnet-4.5", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 15, result.Usage.InputTokens)
@@ -585,7 +675,7 @@ func TestClaude55ResponsesSignedThinkingBufferedAndStreamed(t *testing.T) {
 			svc := &GatewayService{}
 			var err error
 			if stream {
-				_, err = svc.handleResponsesStreamingResponse(resp, c, "public-claude", model, nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+				_, err = svc.handleResponsesStreamingResponse(context.Background(), nil, resp, c, "public-claude", model, nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 			} else {
 				_, err = svc.handleResponsesBufferedStreamingResponse(resp, c, "public-claude", model, nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 			}

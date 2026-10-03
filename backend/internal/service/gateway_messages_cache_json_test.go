@@ -57,3 +57,36 @@ func TestAddMessageCacheBreakpoints_JSONStringEscaping(t *testing.T) {
 		})
 	}
 }
+
+// The breakpoint chain must close on the very first append. Appending an
+// assistant reply and the next user turn produces [u1,a1,u2]; without an anchor
+// re-declared on u1 the whole history after the fixed system+tools prefix is
+// billed as a fresh cache write on every one of those turns.
+func TestAddMessageCacheBreakpoints_FirstAppendKeepsHistoryAnchor(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"messages":[
+		{"role":"user","content":[{"type":"text","text":"q1"}]},
+		{"role":"assistant","content":"a1"},
+		{"role":"user","content":[{"type":"text","text":"q2"}]}
+	]}`)
+	out := addMessageCacheBreakpoints(body)
+	require.Equal(t, "ephemeral", gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String())
+	require.Equal(t, "ephemeral", gjson.GetBytes(out, "messages.2.content.0.cache_control.type").String())
+	require.False(t, gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists())
+}
+
+// An assistant turn whose content is a plain string must still take the tail
+// breakpoint; previously the assistant branch returned early.
+func TestAddMessageCacheBreakpoints_StringAssistantTail(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"messages":[
+		{"role":"user","content":[{"type":"text","text":"q1"}]},
+		{"role":"assistant","content":"plain reply"}
+	]}`)
+	out := addMessageCacheBreakpoints(body)
+	require.True(t, gjson.GetBytes(out, "messages.1.content").IsArray())
+	require.Equal(t, "plain reply", gjson.GetBytes(out, "messages.1.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.GetBytes(out, "messages.1.content.0.cache_control.type").String())
+}

@@ -70,14 +70,28 @@ func addMessageCacheBreakpoints(body []byte) []byte {
 
 	lastIdx := len(arr) - 1
 	if arr[lastIdx].Get("role").String() == "assistant" {
-		if idx := lastSendableAssistantContentBlock(&arr[lastIdx]); idx >= 0 {
+		if idx, ok := lastSendableAssistantContentBlock(&arr[lastIdx]); ok {
 			body = injectCacheControlOnContentBlock(body, lastIdx, idx)
+		} else if !arr[lastIdx].Get("content").IsArray() {
+			// Plain string content carries no thinking block, so it is promoted
+			// to a text block by injectCacheControlOnLastContentBlock. Skipping
+			// it here silently dropped the breakpoint for assistant turns.
+			body = injectCacheControlOnLastContentBlock(body, lastIdx, &arr[lastIdx])
 		}
 	} else {
 		body = injectCacheControlOnLastContentBlock(body, lastIdx, &arr[lastIdx])
 	}
 
-	if len(arr) >= 4 {
+	// 2. 当 messages 数 ≥ 3 时，再在"倒数第二个 user 轮次"打断点。
+	//
+	// 这里必须从 ≥4 放宽到 ≥3：上游只会命中"当前请求自身打断了 cache_control
+	// 的那个前缀"。Conversation 从 [u1] 变成 [u1,a1,u2] 时，上一轮写入的 u1 条目
+	// 必须在这一轮被"重新声明"为断点，否则整段历史只能重新写缓存——实测线上
+	// 表现为首轮写入约 2 万 token 后，紧接着的第二轮 cache_read 只有固定
+	// system+tools 前缀（21252），其余 20177 全部重新计费为 cache_creation。
+	// ≥3 时倒数第二个 user 恰好就是 u1，与上一轮的"最后一条 message"断点对齐，
+	// 之后每轮都自然衔接。
+	if len(arr) >= 3 {
 		userCount := 0
 		for i := len(arr) - 1; i >= 0; i-- {
 			if arr[i].Get("role").String() != "user" {
@@ -111,19 +125,23 @@ func addResponsesAnthropicCacheBreakpoints(body []byte) []byte {
 	return addMessageCacheBreakpoints(stripMessageCacheControl(body))
 }
 
-func lastSendableAssistantContentBlock(msg *gjson.Result) int {
+// lastSendableAssistantContentBlock reports the index of the last assistant
+// content block that may carry cache_control. Anthropic rejects cache_control on
+// thinking blocks, so an all-thinking message has none. ok is false when no
+// block qualifies, including when content is not a block array at all.
+func lastSendableAssistantContentBlock(msg *gjson.Result) (int, bool) {
 	content := msg.Get("content")
 	if !content.IsArray() {
-		return -1
+		return 0, false
 	}
 	blocks := content.Array()
 	for i := len(blocks) - 1; i >= 0; i-- {
 		blockType := blocks[i].Get("type").String()
 		if blockType != "thinking" && blockType != "redacted_thinking" {
-			return i
+			return i, true
 		}
 	}
-	return -1
+	return 0, false
 }
 
 func (s *GatewayService) isRewriteMessageCacheControlEnabled(ctx context.Context) bool {

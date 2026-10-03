@@ -122,6 +122,15 @@ func (s *GatewayService) ForwardAsResponses(
 	// 7. Enforce cache_control block limit
 	anthropicBody = enforceCacheControlLimit(anthropicBody)
 
+	// 7.1 Apply the opt-in 1h cache TTL to Anthropic OAuth/SetupToken accounts,
+	// matching /v1/messages. Bridged Responses history and the Codex tool/system
+	// prefix are byte-stable across sessions, so a 1h TTL lets a new session read
+	// the warm prefix instead of writing the whole 40k+ prompt again whenever the
+	// default 5m window has lapsed.
+	if s.shouldInjectAnthropicCacheTTL1h(ctx, account) {
+		anthropicBody = injectAnthropicCacheControlTTL1h(anthropicBody)
+	}
+
 	// 8. Get access token
 	token, tokenType, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -199,7 +208,7 @@ func (s *GatewayService) ForwardAsResponses(
 	var result *ForwardResult
 	var handleErr error
 	if clientStream {
-		result, handleErr = s.handleResponsesStreamingResponse(resp, c, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
+		result, handleErr = s.handleResponsesStreamingResponse(ctx, account, resp, c, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
 	} else {
 		result, handleErr = s.handleResponsesBufferedStreamingResponse(resp, c, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
 	}
@@ -390,18 +399,49 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	// 读间隔上限：上游挂住 SSE 时必须结束装配循环，否则响应头尚未提交，客户端
+	// 会一直等待。语义与 native Anthropic buffered 路径一致。
+	streamInterval := time.Duration(0)
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	pump := newAnthropicNativeLinePump(scanner, streamInterval)
+	defer pump.stop()
+
+	onIdle := func() (*ForwardResult, error) {
+		_ = resp.Body.Close()
+		logger.L().Warn("forward_as_responses buffered: data interval timeout",
+			zap.String("request_id", requestID),
+			zap.Duration("interval", streamInterval),
+		)
+		writeResponsesError(c, http.StatusBadGateway, "server_error", "Upstream stream data interval timeout")
+		return nil, errAnthropicNativeStreamIdle
+	}
+
+	var readErr error
+	for {
+		line, err := pump.next()
+		if err != nil {
+			if errors.Is(err, errAnthropicNativeStreamIdle) {
+				return onIdle()
+			}
+			readErr = err
+			break
+		}
 		eventType, ok := parseAnthropicSSEField(line, "event")
 		if !ok {
 			continue
 		}
 
 		// Read the data line
-		if !scanner.Scan() {
+		dataLine, err := pump.next()
+		if err != nil {
+			if errors.Is(err, errAnthropicNativeStreamIdle) {
+				return onIdle()
+			}
+			readErr = err
 			break
 		}
-		dataLine := scanner.Text()
 		payload, ok := parseAnthropicSSEField(dataLine, "data")
 		if !ok {
 			continue
@@ -454,10 +494,10 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if readErr != nil {
+		if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, context.Canceled) && !errors.Is(readErr, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_responses buffered: read error",
-				zap.Error(err),
+				zap.Error(readErr),
 				zap.String("request_id", requestID),
 			)
 		}
@@ -520,6 +560,8 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 // handleResponsesStreamingResponse reads Anthropic SSE events from upstream,
 // converts each to Responses SSE events, and writes them to the client.
 func (s *GatewayService) handleResponsesStreamingResponse(
+	ctx context.Context,
+	account *Account,
 	resp *http.Response,
 	c *gin.Context,
 	originalModel string,
@@ -546,6 +588,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	clientDisconnected := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -554,18 +597,72 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
+	// 读间隔上限：上游挂住 SSE（不发数据也不断连）时必须结束转换循环。
+	// 上游 ctx 是 WithoutCancel（detachStreamUpstreamContext），http.Client 也
+	// 没有整体 Timeout；没有这条界限时 scanner.Scan() 会永久阻塞——线上
+	// claude-opus-5-5 出现过首 token 后 8~10 分钟没有输出、最终只记 6~8 个
+	// output token 的挂死请求。语义与 native Anthropic 路径的
+	// anthropicNativeLinePump 一致，间隔取 gateway.stream_data_interval_timeout。
+	streamInterval := time.Duration(0)
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	pump := newAnthropicNativeLinePump(scanner, streamInterval)
+	defer pump.stop()
+
 	resultWithUsage := func() *ForwardResult {
 		return &ForwardResult{
-			RequestID:       requestID,
-			UpstreamHeaders: resp.Header,
-			Usage:           usage,
-			Model:           originalModel,
-			UpstreamModel:   mappedModel,
-			ReasoningEffort: reasoningEffort,
-			Stream:          true,
-			Duration:        time.Since(startTime),
-			FirstTokenMs:    firstTokenMs,
+			RequestID:        requestID,
+			UpstreamHeaders:  resp.Header,
+			Usage:            usage,
+			Model:            originalModel,
+			UpstreamModel:    mappedModel,
+			ReasoningEffort:  reasoningEffort,
+			Stream:           true,
+			Duration:         time.Since(startTime),
+			FirstTokenMs:     firstTokenMs,
+			ClientDisconnect: clientDisconnected,
 		}
+	}
+
+	// nextLine 返回下一行 SSE 文本；readErr 非 nil 时调用方需结束转换循环。
+	// errAnthropicNativeStreamIdle 表示上游读间隔超时（见上方注释），其余读错误
+	// 已就地记录。
+	nextLine := func() (string, error) {
+		line, readErr := pump.next()
+		if readErr == nil {
+			return line, nil
+		}
+		if errors.Is(readErr, errAnthropicNativeStreamIdle) {
+			return "", errAnthropicNativeStreamIdle
+		}
+		if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, context.Canceled) && !errors.Is(readErr, context.DeadlineExceeded) {
+			logger.L().Warn("forward_as_responses stream: read error",
+				zap.Error(readErr),
+				zap.String("request_id", requestID),
+			)
+		}
+		// Propagate EOF and read errors: pump.next keeps returning the same
+		// terminal error once the reader goroutine exits, so swallowing it here
+		// would spin this loop forever.
+		return "", readErr
+	}
+
+	onStreamIdle := func() (*ForwardResult, error) {
+		_ = resp.Body.Close()
+		fields := []zap.Field{
+			zap.String("request_id", requestID),
+			zap.Duration("interval", streamInterval),
+			zap.String("model", mappedModel),
+		}
+		if account != nil {
+			fields = append(fields, zap.Int64("account_id", account.ID))
+		}
+		logger.L().Warn("forward_as_responses stream: data interval timeout", fields...)
+		if s.rateLimitService != nil && account != nil {
+			s.rateLimitService.HandleStreamTimeout(ctx, account, mappedModel)
+		}
+		return resultWithUsage(), errAnthropicNativeStreamIdle
 	}
 
 	// processEvent handles a single parsed Anthropic SSE event.
@@ -593,6 +690,12 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 
 		// Convert to Responses events
 		events := apicompat.AnthropicEventToResponsesEvents(event, state)
+		// 客户端断开后继续排水上游至流自然结束：Anthropic 的最终 usage 只在
+		// message_delta 携带，提前退出会把整段生成记成 ~1 token。写侧只做
+		// finalize 需要的最小工作，不再向已断开的客户端写事件。
+		if clientDisconnected {
+			return true
+		}
 		for _, evt := range events {
 			payload, err := json.Marshal(evt)
 			if err != nil {
@@ -628,7 +731,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 
 	finalizeStream := func() (*ForwardResult, error) {
-		if finalEvents := apicompat.FinalizeAnthropicResponsesStream(state); len(finalEvents) > 0 {
+		if finalEvents := apicompat.FinalizeAnthropicResponsesStream(state); len(finalEvents) > 0 && !clientDisconnected {
 			for _, evt := range finalEvents {
 				sse, err := apicompat.ResponsesEventToSSE(evt)
 				if err != nil {
@@ -643,18 +746,27 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 
 	// Read Anthropic SSE events
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, readErr := nextLine()
+		if readErr != nil {
+			if errors.Is(readErr, errAnthropicNativeStreamIdle) {
+				return onStreamIdle()
+			}
+			break
+		}
 		eventType, ok := parseAnthropicSSEField(line, "event")
 		if !ok {
 			continue
 		}
 
 		// Read data line
-		if !scanner.Scan() {
+		dataLine, dataErr := nextLine()
+		if dataErr != nil {
+			if errors.Is(dataErr, errAnthropicNativeStreamIdle) {
+				return onStreamIdle()
+			}
 			break
 		}
-		dataLine := scanner.Text()
 		payload, ok := parseAnthropicSSEField(dataLine, "data")
 		if !ok {
 			continue
@@ -671,16 +783,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		}
 
 		if processEvent(&event) {
-			return resultWithUsage(), nil
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			logger.L().Warn("forward_as_responses stream: read error",
-				zap.Error(err),
-				zap.String("request_id", requestID),
-			)
+			clientDisconnected = true
 		}
 	}
 
