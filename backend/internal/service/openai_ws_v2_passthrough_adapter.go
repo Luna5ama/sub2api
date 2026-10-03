@@ -644,6 +644,9 @@ func (c *openAIWSClientFrameConn) WriteFrame(ctx context.Context, msgType coderw
 		if normalized, changed := normalizeCompletedImageGenerationStatus(payload); changed {
 			payload = normalized
 		}
+		if normalized, changed := normalizeOpenAIResponsesStreamingMessagePhase(payload); changed {
+			payload = normalized
+		}
 		if c.restoreResponseModel != nil {
 			payload = c.restoreResponseModel(payload)
 		}

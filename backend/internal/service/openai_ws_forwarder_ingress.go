@@ -1033,6 +1033,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if normalized, changed := normalizeCompletedImageGenerationStatus(upstreamMessage); changed {
 				upstreamMessage = normalized
 			}
+			if normalized, changed := normalizeOpenAIResponsesStreamingMessagePhase(upstreamMessage); changed {
+				upstreamMessage = normalized
+			}
 
 			eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
 			responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)

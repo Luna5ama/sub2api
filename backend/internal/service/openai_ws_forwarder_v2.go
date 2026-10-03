@@ -608,6 +608,9 @@ readLoop:
 		if normalized, changed := normalizeCompletedImageGenerationStatus(message); changed {
 			message = normalized
 		}
+		if normalized, changed := normalizeOpenAIResponsesStreamingMessagePhase(message); changed {
+			message = normalized
+		}
 
 		eventType, eventResponseID, responseField := parseOpenAIWSEventEnvelope(message)
 		if eventType == "" {

@@ -621,6 +621,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				data = string(normalizedData)
 				line = "data: " + data
 			}
+			if normalizedData, normalized := normalizeOpenAIResponsesStreamingMessagePhase(dataBytes); normalized {
+				dataBytes = normalizedData
+				data = string(normalizedData)
+				line = "data: " + data
+			}
 			imageCounter.AddSSEData(dataBytes)
 			searchCounter += countGrokNativeSearchCallsInSSEDataDedup(dataBytes, streamSearchSeen)
 
@@ -2040,6 +2045,44 @@ func normalizeCompletedImageGenerationStatus(data []byte) ([]byte, bool) {
 	default:
 		return data, false
 	}
+}
+
+// normalizeOpenAIResponsesStreamingMessagePhase drops a premature
+// "final_answer" phase from an assistant message announced by
+// response.output_item.added.
+//
+// An added item is by definition still in progress, so the phase it reports is
+// a guess. Native /responses upstreams here announce every interim assistant
+// message with phase "final_answer" and only correct it to "commentary" in the
+// matching response.output_item.done; that is a property of the upstream
+// stream, not of the model, so it reproduces on DeepSeek and on GPT-named
+// models alike. The Chat Completions bridge is unaffected because it never
+// authors a phase. Codex reads a streaming "final_answer" message as the turn's
+// terminal answer, so an interim preamble momentarily collapses the work log
+// and the UI jumps back once the next item arrives. The done event carries the
+// authoritative phase, so leave the added item phase-unknown and let the client
+// defer to it.
+func normalizeOpenAIResponsesStreamingMessagePhase(data []byte) ([]byte, bool) {
+	if len(data) == 0 || !bytes.Contains(data, []byte(`"phase"`)) || !gjson.ValidBytes(data) {
+		return data, false
+	}
+	if strings.TrimSpace(gjson.GetBytes(data, "type").String()) != "response.output_item.added" {
+		return data, false
+	}
+	item := gjson.GetBytes(data, "item")
+	if !item.Exists() || !item.IsObject() ||
+		strings.TrimSpace(item.Get("type").String()) != "message" ||
+		strings.TrimSpace(item.Get("role").String()) != "assistant" ||
+		strings.TrimSpace(item.Get("status").String()) != "in_progress" ||
+		strings.TrimSpace(item.Get("phase").String()) != "final_answer" {
+		return data, false
+	}
+
+	updated, err := sjson.DeleteBytes(data, "item.phase")
+	if err != nil {
+		return data, false
+	}
+	return updated, true
 }
 
 // responsesStreamOutputItems remembers the raw item carried by each
