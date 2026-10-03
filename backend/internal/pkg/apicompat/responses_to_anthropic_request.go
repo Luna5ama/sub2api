@@ -16,7 +16,7 @@ import (
 func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, error) {
 	isOpus55 := claude.IsOpus55(req.Model)
 	isSonnet55 := claude.IsSonnet55(req.Model)
-	system, messages, err := convertResponsesInputToAnthropic(req.Instructions, req.Input, isOpus55 || isSonnet55)
+	system, messages, err := convertResponsesInputToAnthropic(req.Model, req.Instructions, req.Input, isOpus55 || isSonnet55)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func mapResponsesEffortToAnthropic(effort string) string {
 // convertResponsesInputToAnthropic extracts system prompt and messages from
 // a Responses API instructions + input array. Returns the system as raw JSON
 // (for Anthropic's polymorphic system field) and a list of Anthropic messages.
-func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMessage, preserveThinking bool) (json.RawMessage, []AnthropicMessage, error) {
+func convertResponsesInputToAnthropic(model string, instructions string, inputRaw json.RawMessage, preserveThinking bool) (json.RawMessage, []AnthropicMessage, error) {
 	var systemParts []string
 	if strings.TrimSpace(instructions) != "" {
 		systemParts = append(systemParts, strings.TrimSpace(instructions))
@@ -254,7 +254,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 					Role: "user",
 					Content: json.RawMessage(mustMarshalAnthropicContent([]AnthropicContentBlock{{
 						Type: "text",
-						Text: "<conversation_summary>\n" + summary + "\n</conversation_summary>",
+						Text: CompactionReplayTextForModel(model, summary),
 					}})),
 				})
 			}
@@ -330,7 +330,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 			Role: "user",
 			Content: json.RawMessage(mustMarshalAnthropicContent([]AnthropicContentBlock{{
 				Type: "text",
-				Text: codexCompactionSummaryPrompt,
+				Text: CompactionSummaryPromptForModel(model),
 			}})),
 		})
 	}
@@ -345,11 +345,16 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 
 const defaultAnthropicMaxTokens = 128000
 
-const codexCompactionSummaryPrompt = `Your task is to produce a faithful, concise summary of the conversation so far so that a successor assistant can continue the work seamlessly after the earlier turns are discarded. The successor will see the user's original query plus this summary. Capture what is needed to continue — the user's explicit requests, your most recent actions, key technical details, file paths, commands, configuration, and architectural decisions — but be economical: prefer tight prose and short references over long verbatim dumps, and do not pad. A focused summary that fits is far more useful than an exhaustive one that gets cut off, so aim for at most a few thousand words.
+// claudeCodeCompactionSummaryPrompt is the compaction instruction for Claude-family
+// upstreams. It mirrors Claude Code's own /compact instruction, which Claude models
+// are specifically tuned for, and it stays on the Claude path only: a Claude
+// upstream is the one Codex client that asks for an exhaustive archive instead of
+// the short Codex handoff in codexCompactionHandoffPrompt.
+const claudeCodeCompactionSummaryPrompt = `Your task is to produce a faithful, concise summary of the conversation so far so that a successor assistant can continue the work seamlessly after the earlier turns are discarded. The successor will see the user's original query plus this summary. Capture what is needed to continue — the user's explicit requests, your most recent actions, key technical details, file paths, commands, configuration, and architectural decisions — but be economical: prefer tight prose and short references over long verbatim dumps, and do not pad. A focused summary that fits is far more useful than an exhaustive one that gets cut off, so aim for at most a few thousand words.
 
 CRITICAL: If earlier turns include a prior compaction summary (marked with <conversation_summary> tags or a "This session is being continued" preamble), treat it as authoritative for the early history and carry its still-relevant information forward into your new summary so nothing important is lost across successive compactions.
 
-Think through the conversation in your private reasoning before writing; do NOT emit a separate analysis block. Output the final summary inside a single <summary>...</summary> block, organized into the following numbered sections. Include every section heading even if a section is empty (write "None" in that section):
+Think through the conversation in your private reasoning before writing; do NOT emit a separate analysis block. Output the summary organized into the following numbered sections. Include every section heading even if a section is empty (write "None" in that section):
 
 1. Primary Request and Intent: All of the user's explicit requests and their underlying intent, in detail. Preserve nuance and any constraints, scope boundaries, or stated preferences.
 2. Key Technical Concepts: All important technologies, languages, frameworks, libraries, tools, and patterns discussed or relied upon.
@@ -361,7 +366,7 @@ Think through the conversation in your private reasoning before writing; do NOT 
 8. Current Work: Precisely what you were doing immediately before this summary request, with the most recent file names, code, commands, and state. Be specific enough that work can resume mid-stream.
 9. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
 
-IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</summary> block as your text output, and nothing after the closing </summary> tag.`
+IMPORTANT: Do NOT call or use any tools. Respond with the summary text only, with no wrapper tags and nothing after it.`
 
 func mustMarshalAnthropicContent(blocks []AnthropicContentBlock) []byte {
 	encoded, _ := json.Marshal(blocks)

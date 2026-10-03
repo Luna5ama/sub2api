@@ -276,7 +276,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// The passthrough branch returns before the shared rewrite below, so
 		// apply the same non-native compaction reshaping here.
 		if shouldRewriteCodexCompactionStream(c, account) {
-			rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body)
+			rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body, mappedModel)
 			if rewriteErr != nil {
 				return nil, fmt.Errorf("rewrite codex compaction trigger: %w", rewriteErr)
 			}
@@ -285,7 +285,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				originalBody = rewrittenBody
 			}
 		} else if shouldRewriteCodexCompactionRequestForUpstream(account) {
-			rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+			rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body, mappedModel)
 			if rewriteErr != nil {
 				return nil, fmt.Errorf("rewrite replayed codex compaction summary: %w", rewriteErr)
 			}
@@ -760,7 +760,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// gateway plaintext compaction items, so hand it the same summary task the
 	// bridged paths use. The response side rewrites the answer back.
 	if shouldRewriteCodexCompactionStream(c, account) {
-		rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body)
+		rewrittenBody, changed, rewriteErr := rewriteCodexCompactionTriggerForUpstream(body, upstreamModel)
 		if rewriteErr != nil {
 			return nil, fmt.Errorf("rewrite codex compaction trigger: %w", rewriteErr)
 		}
@@ -772,7 +772,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	} else if shouldRewriteCodexCompactionRequestForUpstream(account) {
 		// Later turns replay the gateway plaintext compaction item without a
 		// trigger; the upstream still cannot read the item type itself.
-		rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+		rewrittenBody, changed, rewriteErr := rewriteCodexReplayedCompactionSummariesForUpstream(body, upstreamModel)
 		if rewriteErr != nil {
 			return nil, fmt.Errorf("rewrite replayed codex compaction summary: %w", rewriteErr)
 		}

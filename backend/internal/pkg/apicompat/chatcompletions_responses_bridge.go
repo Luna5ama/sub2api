@@ -48,7 +48,7 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 		return nil, fmt.Errorf("responses request is nil")
 	}
 
-	messages, err := responsesInputToChatMessagesWithOptions(req.Instructions, req.Input, opts)
+	messages, err := responsesInputToChatMessagesWithOptions(req.Model, req.Instructions, req.Input, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -306,12 +306,14 @@ func HasToolSearchTool(tools []ResponsesTool) bool {
 // scattered across per-item cases, and makes unknown future codex item types
 // fail safe instead of leaking into the upstream request.
 func responsesInputToChatMessages(instructions string, inputRaw json.RawMessage) ([]ChatMessage, error) {
-	return responsesInputToChatMessagesWithOptions(instructions, inputRaw, nil)
+	return responsesInputToChatMessagesWithOptions("", instructions, inputRaw, nil)
 }
 
 // responsesInputToChatMessagesWithOptions is responsesInputToChatMessages with
-// optional hooks (see ResponsesToChatOptions).
-func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.RawMessage, opts *ResponsesToChatOptions) ([]ChatMessage, error) {
+// optional hooks (see ResponsesToChatOptions). model selects the compaction
+// prompt and replay wording; the empty model used by direct callers means
+// "not Claude", i.e. the Codex-style handoff.
+func responsesInputToChatMessagesWithOptions(model string, instructions string, inputRaw json.RawMessage, opts *ResponsesToChatOptions) ([]ChatMessage, error) {
 	var messages []ChatMessage
 	if strings.TrimSpace(instructions) != "" {
 		content, _ := json.Marshal(instructions)
@@ -349,14 +351,14 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 		}
 	}
 
-	built, mediaByCallID, err := buildChatMessagesFromItems(messages, rawItems, opts)
+	built, mediaByCallID, err := buildChatMessagesFromItems(model, messages, rawItems, opts)
 	if err != nil {
 		return nil, err
 	}
 	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
 	normalized = normalizeResponsesDerivedChatMessageRoles(normalized)
 	if compactionTrigger {
-		content, _ := json.Marshal(codexCompactionSummaryPrompt)
+		content, _ := json.Marshal(CompactionSummaryPromptForModel(model))
 		normalized = append(normalized, ChatMessage{Role: "user", Content: content})
 	}
 	return normalized, nil
@@ -419,7 +421,7 @@ func normalizeResponsesDerivedChatMessageRoles(messages []ChatMessage) []ChatMes
 
 // buildChatMessagesFromItems walks the Responses input items and appends the
 // corresponding Chat messages.
-func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessage, opts *ResponsesToChatOptions) ([]ChatMessage, toolOutputMediaByCallID, error) {
+func buildChatMessagesFromItems(model string, messages []ChatMessage, rawItems []json.RawMessage, opts *ResponsesToChatOptions) ([]ChatMessage, toolOutputMediaByCallID, error) {
 	// pendingReasoning holds the reasoning text from a reasoning item until the
 	// assistant message it belongs to is emitted. DeepSeek's thinking mode
 	// requires the reasoning_content that produced a tool call to be passed back
@@ -486,10 +488,10 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			continue
 		case "compaction":
 			if summary, ok := decodePlaintextCompactionSummary(rawString(item["encrypted_content"])); ok && summary != "" {
-				encodedSummary, _ := json.Marshal(summary)
+				content, _ := json.Marshal(CompactionReplayTextForModel(model, summary))
 				messages = append(messages, ChatMessage{
 					Role:    "user",
-					Content: []byte(`"<conversation_summary>"` + string(encodedSummary) + `"</conversation_summary>"`),
+					Content: content,
 				})
 			}
 			continue

@@ -859,10 +859,14 @@ func TestBuildGrokCompactRequestBodyUsesResponsesCompactionTurn(t *testing.T) {
 	require.Equal(t, "reasoning.encrypted_content", gjson.GetBytes(patched, "include.0").String())
 	require.Equal(t, "hello", gjson.GetBytes(patched, "input.0.content.0.text").String())
 	prompt := gjson.GetBytes(patched, "input.1.content.0.text").String()
-	require.Contains(t, prompt, "1. Primary Request and Intent")
-	require.Contains(t, prompt, "9. Optional Next Step")
-	require.Contains(t, prompt, "Respond with ONLY the <summary>...</summary> block")
-	require.NotContains(t, prompt, "<summary_request>")
+	require.Contains(t, prompt, "CONTEXT CHECKPOINT COMPACTION")
+	require.Contains(t, prompt, "- Current progress and key decisions made")
+	require.Contains(t, prompt, "- What remains to be done (clear next steps)")
+	require.Contains(t, prompt, "Do not call or use any tools.")
+	// Grok-only guard: the out-of-band memory directory belongs to a future agent.
+	require.Contains(t, prompt, "/tmp/compaction/segment_*.md")
+	require.NotContains(t, prompt, "1. Primary Request and Intent")
+	require.NotContains(t, prompt, "<summary>")
 }
 
 func TestConvertGrokResponseToOpenAICompact(t *testing.T) {

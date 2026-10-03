@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -52,7 +53,7 @@ func TestRewriteCodexCompactionTrigger_ReplacesTriggerWithSummaryPrompt(t *testi
 	t.Parallel()
 
 	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":"hi"},{"type":"compaction_trigger"}]}`)
-	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body)
+	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.True(t, changed)
 
@@ -67,7 +68,7 @@ func TestRewriteCodexCompactionTrigger_ReplacesTriggerWithSummaryPrompt(t *testi
 
 // The compaction turn rewrites both the trigger and any replayed summary it
 // carries: the trigger becomes the summarisation instruction and the plaintext
-// item becomes a <conversation_summary> message.
+// item becomes a plain user message introduced by Codex's summary prefix.
 func TestRewriteCodexCompactionTrigger_ConvertsSummaryAlongsideTrigger(t *testing.T) {
 	t.Parallel()
 
@@ -75,7 +76,7 @@ func TestRewriteCodexCompactionTrigger_ConvertsSummaryAlongsideTrigger(t *testin
 	require.True(t, ok)
 
 	body := []byte(`{"model":"m","input":[` + string(item) + `,{"type":"message","role":"user","content":"next"},{"type":"compaction_trigger"}]}`)
-	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body)
+	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.True(t, changed)
 
@@ -83,16 +84,16 @@ func TestRewriteCodexCompactionTrigger_ConvertsSummaryAlongsideTrigger(t *testin
 	require.Len(t, input.Array(), 3)
 	require.NotContains(t, string(out), `"type":"compaction"`)
 	require.Equal(t,
-		"<conversation_summary>\nearlier context\n</conversation_summary>",
+		apicompat.CodexCompactionHandoffMessage("earlier context"),
 		input.Array()[0].Get("content.0.text").String(),
 	)
 	require.Equal(t, "next", input.Array()[1].Get("content").String())
-	require.Contains(t, input.Array()[2].Get("content.0.text").String(), "<summary>")
+	require.Contains(t, input.Array()[2].Get("content.0.text").String(), "CONTEXT CHECKPOINT COMPACTION")
 }
 
 // A non-compaction turn replays the gateway summary without a trigger. It still
-// has to become a <conversation_summary> message, or the upstream sees an item
-// type it cannot read. This is the regression the trigger-scoped gate caused.
+// has to become a user message, or the upstream sees an item type it cannot
+// read. This is the regression the trigger-scoped gate caused.
 func TestRewriteCodexReplayedCompactionSummaries_ConvertsWithoutTrigger(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +101,7 @@ func TestRewriteCodexReplayedCompactionSummaries_ConvertsWithoutTrigger(t *testi
 	require.True(t, ok)
 
 	body := []byte(`{"model":"m","input":[` + string(item) + `,{"type":"message","role":"user","content":"next"}]}`)
-	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.True(t, changed)
 
@@ -108,10 +109,33 @@ func TestRewriteCodexReplayedCompactionSummaries_ConvertsWithoutTrigger(t *testi
 	require.Len(t, input.Array(), 2)
 	require.NotContains(t, string(out), `"type":"compaction"`)
 	require.Equal(t,
-		"<conversation_summary>\nearlier context\n</conversation_summary>",
+		apicompat.CodexCompactionHandoffMessage("earlier context"),
 		input.Array()[0].Get("content.0.text").String(),
 	)
 	require.Equal(t, "next", input.Array()[1].Get("content").String())
+}
+
+// The Claude path keeps the Claude Code shape: the nine-section prompt and the
+// <conversation_summary> wrapper its own instructions refer to.
+func TestRewriteCodexCompactionTrigger_KeepsClaudeCodeShapeForClaudeModels(t *testing.T) {
+	t.Parallel()
+
+	item, ok := codexCompactionSummaryItem("earlier context")
+	require.True(t, ok)
+
+	body := []byte(`{"model":"claude-opus-5-5","input":[` + string(item) + `,{"type":"compaction_trigger"}]}`)
+	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body, "claude-opus-5-5")
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	input := gjson.GetBytes(out, "input")
+	require.Len(t, input.Array(), 2)
+	require.Equal(t,
+		"<conversation_summary>\nearlier context\n</conversation_summary>",
+		input.Array()[0].Get("content.0.text").String(),
+	)
+	require.Contains(t, input.Array()[1].Get("content.0.text").String(), "1. Primary Request and Intent")
+	require.NotContains(t, input.Array()[1].Get("content.0.text").String(), "CONTEXT CHECKPOINT COMPACTION")
 }
 
 // Upstream-native encrypted content is left alone: the invalid_encrypted_content
@@ -120,7 +144,7 @@ func TestRewriteCodexReplayedCompactionSummaries_KeepsForeignEncryptedItem(t *te
 	t.Parallel()
 
 	body := []byte(`{"model":"m","input":[{"type":"compaction","encrypted_content":"Zm9yZWlnbg=="},{"type":"message","role":"user","content":"next"}]}`)
-	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.False(t, changed)
 	require.Equal(t, string(body), string(out))
@@ -130,7 +154,7 @@ func TestRewriteCodexReplayedCompactionSummaries_NoopOnOrdinaryTurn(t *testing.T
 	t.Parallel()
 
 	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":"hi"}]}`)
-	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body)
+	out, changed, err := rewriteCodexReplayedCompactionSummariesForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.False(t, changed)
 	require.Equal(t, string(body), string(out))
@@ -140,7 +164,7 @@ func TestRewriteCodexCompactionTrigger_NoopOnOrdinaryTurn(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":"hi"}]}`)
-	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body)
+	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.False(t, changed)
 	require.Equal(t, string(body), string(out))
@@ -150,7 +174,7 @@ func TestRewriteCodexCompactionTrigger_NoopWithoutArrayInput(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{"model":"m","input":"hi"}`)
-	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body)
+	out, changed, err := rewriteCodexCompactionTriggerForUpstream(body, "glm-5.3")
 	require.NoError(t, err)
 	require.False(t, changed)
 	require.Equal(t, string(body), string(out))

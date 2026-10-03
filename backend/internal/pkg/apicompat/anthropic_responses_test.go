@@ -1879,7 +1879,7 @@ func TestOpus55SignedThinkingResponsesRoundTrip(t *testing.T) {
 	require.Equal(t, block, blocks[0])
 	require.Equal(t, "tool_use", blocks[1].Type)
 	// Arbitrary OpenAI ciphertext must never be treated as an Anthropic signature.
-	_, _, err = convertResponsesInputToAnthropic("", json.RawMessage(`[{"type":"reasoning","encrypted_content":"anthropic-thinking-v1:!"}]`), true)
+	_, _, err = convertResponsesInputToAnthropic("", "", json.RawMessage(`[{"type":"reasoning","encrypted_content":"anthropic-thinking-v1:!"}]`), true)
 	require.Error(t, err)
 }
 

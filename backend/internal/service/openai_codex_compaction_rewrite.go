@@ -93,15 +93,16 @@ func shouldRewriteCodexCompactionRequestForUpstream(account *Account) bool {
 }
 
 // rewriteCodexReplayedCompactionSummariesForUpstream converts a gateway
-// plaintext compaction item into the <conversation_summary> message a
-// non-native upstream can read, on turns that are not themselves compaction
-// requests.
+// plaintext compaction item into the plain user message a non-native upstream
+// can read, on turns that are not themselves compaction requests. The wording
+// follows the target model: Codex's own summary prefix for everything except
+// Claude-family models, which keep the <conversation_summary> wrapper.
 //
 // Only the gateway envelope is touched. A compaction item carrying
 // upstream-native encrypted content is left exactly as it is: the retry path
 // that strips a rejected invalid_encrypted_content item owns that decision, and
 // dropping it here would pre-empt that recovery.
-func rewriteCodexReplayedCompactionSummariesForUpstream(body []byte) ([]byte, bool, error) {
+func rewriteCodexReplayedCompactionSummariesForUpstream(body []byte, model string) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -125,7 +126,7 @@ func rewriteCodexReplayedCompactionSummariesForUpstream(body []byte) ([]byte, bo
 				continue
 			}
 			changed = true
-			rebuilt = append(rebuilt, codexCompactionSummaryInputItem(summary))
+			rebuilt = append(rebuilt, codexCompactionSummaryInputItem(model, summary))
 		default:
 			rebuilt = append(rebuilt, item.Raw)
 		}
@@ -181,10 +182,10 @@ func codexCompactionSummaryFromPlaintextEnvelope(encrypted string) (string, bool
 // Such an upstream ignores compaction_trigger and cannot decrypt the gateway's
 // plaintext compaction items, so the trigger becomes the same summarisation
 // instruction the bridged paths use, and plaintext compaction items in the
-// replayed history become a <conversation_summary> user message. History items
-// the gateway cannot decode (upstream-native encrypted content) are dropped
-// rather than forwarded as an unknown item type.
-func rewriteCodexCompactionTriggerForUpstream(body []byte) ([]byte, bool, error) {
+// replayed history become a plain user message. History items the gateway
+// cannot decode (upstream-native encrypted content) are dropped rather than
+// forwarded as an unknown item type.
+func rewriteCodexCompactionTriggerForUpstream(body []byte, model string) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -203,14 +204,14 @@ func rewriteCodexCompactionTriggerForUpstream(body []byte) ([]byte, bool, error)
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case "compaction_trigger":
 			changed = true
-			rebuilt = append(rebuilt, codexCompactionPromptInputItem())
+			rebuilt = append(rebuilt, codexCompactionPromptInputItem(model))
 		case openAICompactionItemType, "compaction_summary":
 			changed = true
 			summary, decoded := codexCompactionSummaryFromPlaintextEnvelope(item.Get("encrypted_content").String())
 			if !decoded || strings.TrimSpace(summary) == "" {
 				continue
 			}
-			rebuilt = append(rebuilt, codexCompactionSummaryInputItem(summary))
+			rebuilt = append(rebuilt, codexCompactionSummaryInputItem(model, summary))
 		default:
 			rebuilt = append(rebuilt, item.Raw)
 		}
@@ -225,24 +226,24 @@ func rewriteCodexCompactionTriggerForUpstream(body []byte) ([]byte, bool, error)
 	return updated, true, nil
 }
 
-func codexCompactionPromptInputItem() string {
+func codexCompactionPromptInputItem(model string) string {
 	item, err := sjson.SetBytes([]byte(`{"type":"message","role":"user"}`), "content.0.type", "input_text")
 	if err != nil {
 		return ""
 	}
-	item, err = sjson.SetBytes(item, "content.0.text", apicompat.CodexCompactionSummaryPrompt())
+	item, err = sjson.SetBytes(item, "content.0.text", apicompat.CompactionSummaryPromptForModel(model))
 	if err != nil {
 		return ""
 	}
 	return string(item)
 }
 
-func codexCompactionSummaryInputItem(summary string) string {
+func codexCompactionSummaryInputItem(model string, summary string) string {
 	item, err := sjson.SetBytes([]byte(`{"type":"message","role":"user"}`), "content.0.type", "input_text")
 	if err != nil {
 		return ""
 	}
-	item, err = sjson.SetBytes(item, "content.0.text", "<conversation_summary>\n"+summary+"\n</conversation_summary>")
+	item, err = sjson.SetBytes(item, "content.0.text", apicompat.CompactionReplayTextForModel(model, summary))
 	if err != nil {
 		return ""
 	}
