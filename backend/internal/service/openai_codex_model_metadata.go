@@ -180,6 +180,10 @@ func groupCodexModelMetadata(
 		codexExplicitModelTargetsConflictForPlatform(accounts, platform, modelID)
 	publicAlias := upstreamModel != modelID
 	candidates := make([]UpstreamModelMetadata, 0)
+	// Upstream names seen for this entry. A public alias may be served by several
+	// accounts; the name is adopted only when every provider that named the model
+	// agreed, so the result never depends on account iteration order.
+	upstreamNames := make(map[string]struct{})
 	missingMetadata := false
 	for i := range accounts {
 		account := &accounts[i]
@@ -207,6 +211,9 @@ func groupCodexModelMetadata(
 		_, hasOverride := account.ReasoningEffortOverrideFor(modelID, lookupModel)
 		metadata, ok := account.GetUpstreamModelMetadata(lookupModel)
 		if !ok {
+			// Providers that publish only id/display_name have no capability
+			// record. Carry the upstream name through the label channel so the
+			// manifest can still show it without inventing capabilities.
 			if explicitTargetsConflict {
 				return codexModelMetadataOverride{
 					reasoningConflict:       true,
@@ -218,6 +225,9 @@ func groupCodexModelMetadata(
 			if !hasOverride {
 				missingMetadata = true
 			}
+		}
+		if displayName, ok := account.UpstreamModelDisplayName(lookupModel); ok {
+			upstreamNames[displayName] = struct{}{}
 		}
 		metadata.CodexToolCapabilities = accountCodexToolCapabilities(account, lookupModel)
 		// A hand-written account override is a capability declaration, so it
@@ -234,8 +244,26 @@ func groupCodexModelMetadata(
 			CodexToolCapabilities: metadata.CodexToolCapabilities,
 		}}
 	}
+	// Upstream names collected from the label channel. Adopt one only when the
+	// accounts that serve this entry agree, so a shared entry never depends on
+	// account iteration order.
+	if len(upstreamNames) == 1 {
+		for displayName := range upstreamNames {
+			metadata.DisplayName = displayName
+		}
+	} else if len(upstreamNames) > 1 {
+		metadata.DisplayName = ""
+	}
 	if publicAlias {
-		metadata.DisplayName = modelID
+		// A public alias renames the entry the operator asked to expose. It must
+		// not erase a name the upstream itself supplied for the mapped target; a
+		// label that only echoes that target id adds nothing, so it falls back to
+		// the alias the operator configured.
+		if name, ok := upstreamDisplayNameBeyondID(metadata.DisplayName, upstreamModel, modelID); ok {
+			metadata.DisplayName = name
+		} else {
+			metadata.DisplayName = modelID
+		}
 		metadata.Description = configuredCodexCustomDescription
 	}
 	return metadata, true

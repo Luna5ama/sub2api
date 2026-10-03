@@ -27,6 +27,13 @@ func (r *pinnedModelsRoutesRepository) ListByGroup(context.Context, int64) ([]se
 	return []service.Account{r.account}, nil
 }
 
+// The pinned manifest resolves per-account display-name overrides through the
+// schedulable listing, so the stub has to answer it instead of falling through
+// to the embedded nil interface.
+func (r *pinnedModelsRoutesRepository) ListSchedulableByGroupID(context.Context, int64) ([]service.Account, error) {
+	return []service.Account{r.account}, nil
+}
+
 type pinnedModelsRoutesUpstream struct {
 	service.HTTPUpstream
 	ordinaryCalls atomic.Int32

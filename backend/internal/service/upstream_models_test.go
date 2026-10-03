@@ -1185,3 +1185,132 @@ func TestMatchModelsDevProviderOfficialHostsWithoutAPI(t *testing.T) {
 	}}
 	require.False(t, upstreamCatalogNeedsRegistry(capabilitySyncModelIDs([]string{"gpt-6-astra", "gpt-image-2"}), metadata))
 }
+
+// Scenario: an upstream publishes only id/display_name, so no capability record
+// can be built. The name must survive the sync without fabricating capabilities.
+func TestSyncUpstreamModelCatalogPersistsNameOnlyEntries(t *testing.T) {
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"models":[
+				{"id":"glm-5.3","display_name":"GLM 5.3 (Command Code)"},
+				{"id":"name-echoes-id","display_name":"name-echoes-id"}
+			]}`)),
+		},
+		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
+	}}
+	repo := &upstreamModelMetadataRepoStub{}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), &Account{
+		ID: 97, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "key", "base_url": "https://provider.example/v1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"glm-5.3", "name-echoes-id"}, catalog.Models)
+	require.Equal(t, UpstreamModelMetadataIncompleteCode, catalog.Warnings[0].Code)
+	require.NotNil(t, repo.updates, "a name the upstream supplied is worth persisting")
+
+	encoded, err := json.Marshal(repo.updates[UpstreamModelMetadataExtraKey])
+	require.NoError(t, err)
+	var snapshot UpstreamModelMetadataSnapshot
+	require.NoError(t, json.Unmarshal(encoded, &snapshot))
+	require.Empty(t, snapshot.Models, "a name must never be recorded as a capability record")
+	require.Equal(t, "GLM 5.3 (Command Code)", snapshot.DisplayNames["glm-5.3"])
+	require.NotContains(t, snapshot.DisplayNames, "name-echoes-id",
+		"a display name that only restates the model id adds nothing")
+}
+
+// Scenario: a name-only upstream response must not replace a snapshot that
+// already holds real capability records.
+func TestSyncUpstreamModelCatalogKeepsCapabilitySnapshotWhenOnlyNamesArrive(t *testing.T) {
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"models":[{"id":"gpt-6-astra","display_name":"Astra Renamed"}]}`)),
+		},
+		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
+	}}
+	repo := &upstreamModelMetadataRepoStub{}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+	account := &Account{
+		ID: 98, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "key", "base_url": "https://provider.example/v1"},
+		Extra: map[string]any{UpstreamModelMetadataExtraKey: map[string]any{
+			"source": "upstream", "models": map[string]any{"gpt-6-astra": map[string]any{
+				"id": "gpt-6-astra", "reasoning": true,
+				"supported_reasoning_levels": []any{"low", "high"},
+				"input_modalities":           []any{"text"},
+				"context_window":             float64(272000),
+			}},
+		}},
+	}
+
+	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.Nil(t, repo.updates, "a capability snapshot must not be replaced by names alone")
+	snapshot := account.GetUpstreamModelMetadataSnapshot()
+	require.Contains(t, snapshot.Models, "gpt-6-astra")
+	require.Empty(t, snapshot.DisplayNames)
+}
+
+func TestUpstreamModelDisplayNamePrefersCompleteRecordAndSkipsIDRestatement(t *testing.T) {
+	account := &Account{}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Models: map[string]UpstreamModelMetadata{
+			"complete": {ID: "complete", DisplayName: "Complete Name"},
+		},
+		DisplayNames: map[string]string{
+			"complete": "Stale Label Channel Name",
+			"named":    "GLM 5.3 (Command Code)",
+			"echoed":   "echoed",
+		},
+	})
+
+	name, ok := account.UpstreamModelDisplayName("complete")
+	require.True(t, ok)
+	require.Equal(t, "Complete Name", name, "the capability record stays authoritative")
+
+	name, ok = account.UpstreamModelDisplayName("named")
+	require.True(t, ok)
+	require.Equal(t, "GLM 5.3 (Command Code)", name)
+
+	_, ok = account.UpstreamModelDisplayName("echoed")
+	require.False(t, ok)
+	_, ok = account.UpstreamModelDisplayName("unknown")
+	require.False(t, ok)
+}
+
+func TestDisplayNamesWithoutCompleteDropsPromotedEntries(t *testing.T) {
+	displayNames := map[string]string{"promoted": "Old Name", "still-name-only": "Only Name"}
+	filtered := displayNamesWithoutComplete(displayNames, map[string]UpstreamModelMetadata{
+		"promoted": {ID: "promoted", DisplayName: "Capability Name"},
+	})
+	require.Equal(t, map[string]string{"still-name-only": "Only Name"}, filtered)
+
+	require.Nil(t, displayNamesWithoutComplete(nil, nil))
+	require.Nil(t, displayNamesWithoutComplete(
+		map[string]string{"promoted": "Old Name"},
+		map[string]UpstreamModelMetadata{"promoted": {ID: "promoted"}},
+	))
+}
+
+// Scenario: alias projection serves two audiences. A Codex manifest is read by
+// the end user, so a real upstream name outlives the alias; the admin picker
+// lists public selectable names, so it keeps the alias label.
+func TestProjectAccountModelsBodyTreatsUpstreamNameByAudience(t *testing.T) {
+	account := newCodexModelsAPIKeyTestAccount("https://provider.example/v1")
+	account.Credentials["model_mapping"] = map[string]any{"my-coder": "glm-5.3"}
+	manifestBody := []byte(`{"models":[{"slug":"glm-5.3","display_name":"GLM 5.3 (Command Code)"}]}`)
+
+	manifest, err := projectAccountModelsBody(manifestBody, account, &Group{}, true)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"models":[{"slug":"my-coder","display_name":"GLM 5.3 (Command Code)"}]}`, string(manifest))
+
+	pickerBody := []byte(`{"data":[{"id":"glm-5.3","display_name":"GLM 5.3 (Command Code)"}]}`)
+	picker, err := projectAccountModelsBody(pickerBody, account, nil, false)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"data":[{"id":"my-coder","display_name":"my-coder"}]}`, string(picker))
+}

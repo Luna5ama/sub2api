@@ -1044,8 +1044,17 @@ func buildCodexModelsManifestWithDisplayNames(
 			descriptor.InputModalities = []string{"text", "image"}
 		}
 		if metadataModelID != modelID {
-			descriptor.DisplayName = modelID
 			descriptor.Description = configuredCodexCustomDescription
+			// An upstream name wins over a public slug: the alias exists to route
+			// the request, not to relabel the provider's own model. An upstream
+			// that merely echoes the model ID leaves the alias name in place.
+			if name, ok := upstreamDisplayNameBeyondID(
+				modelMetadata[modelID].DisplayName, metadataModelID, modelID,
+			); ok {
+				descriptor.DisplayName = name
+			} else {
+				descriptor.DisplayName = modelID
+			}
 		}
 		if override, ok := displayNames[modelID]; ok {
 			descriptor.DisplayName = override
@@ -2246,9 +2255,16 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 		metadataModels[id] = capabilityModel
 		capabilities := accountCodexToolCapabilities(account, capabilityModel)
 		applyCodexToolCapabilities(capabilities, entry, true)
-		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: UpstreamModelMetadata{
-			CodexToolCapabilities: capabilities,
-		}}
+		entryMetadata := UpstreamModelMetadata{CodexToolCapabilities: capabilities}
+		// A standard /models response is often the only place an upstream states
+		// its own label. Keep it so the converted manifest does not replace a
+		// provider name with the bare model id.
+		if displayName, ok := upstreamDisplayNameBeyondID(
+			rawJSONString(entry["display_name"]), id, capabilityModel,
+		); ok {
+			entryMetadata.DisplayName = displayName
+		}
+		modelMetadata[id] = codexModelMetadataOverride{UpstreamModelMetadata: entryMetadata}
 	}
 	if len(modelIDs) == 0 {
 		return body
@@ -2313,7 +2329,7 @@ func (s *OpenAIGatewayService) CompleteAPIKeyCodexModelsManifestForClient(manife
 
 func applySyncedAPIKeyCodexModelMetadata(body []byte, account *Account, overwriteLocalDefaults bool) ([]byte, error) {
 	snapshot := account.GetUpstreamModelMetadataSnapshot()
-	if snapshot == nil || len(snapshot.Models) == 0 {
+	if snapshot == nil || (len(snapshot.Models) == 0 && len(snapshot.DisplayNames) == 0) {
 		return body, nil
 	}
 
@@ -2340,11 +2356,24 @@ func applySyncedAPIKeyCodexModelMetadata(body []byte, account *Account, overwrit
 		lookupModel := account.GetMappedModel(slug)
 		metadata, ok := snapshot.Models[lookupModel]
 		if !ok {
-			continue
+			// Providers that publish only id/display_name have no capability
+			// record; their name still belongs on the manifest entry.
+			displayName, named := account.UpstreamModelDisplayName(lookupModel)
+			if !named {
+				continue
+			}
+			metadata = UpstreamModelMetadata{ID: lookupModel, DisplayName: displayName}
 		}
 		if lookupModel != slug {
-			metadata.DisplayName = ""
 			metadata.Description = ""
+			// The upstream label belongs to the mapped target, so it is kept only
+			// when it says something the alias slug does not. A provider that just
+			// echoes the target id leaves the alias with its own catalog name.
+			displayName, ok := upstreamDisplayNameBeyondID(metadata.DisplayName, lookupModel)
+			metadata.DisplayName = ""
+			if ok {
+				metadata.DisplayName = displayName
+			}
 		}
 
 		descriptor := newConfiguredCodexModelDescriptor(slug)

@@ -240,7 +240,20 @@ func projectAccountModelsBody(body []byte, account *Account, group *Group, codex
 		}
 		entry[idField], _ = json.Marshal(id)
 		if id != target {
-			entry["display_name"], _ = json.Marshal(id)
+			// A Codex manifest is what the end user reads, so a name the upstream
+			// supplied outlives the alias; a name no richer than the upstream
+			// target id falls back to the alias. The admin test picker keeps the
+			// alias label instead, because it lists the public names an operator
+			// can select.
+			keepUpstreamName := false
+			if codex {
+				_, keepUpstreamName = upstreamDisplayNameBeyondID(
+					rawJSONString(entry["display_name"]), target,
+				)
+			}
+			if !keepUpstreamName {
+				entry["display_name"], _ = json.Marshal(id)
+			}
 		}
 		encoded, err := json.Marshal(entry)
 		if err != nil {

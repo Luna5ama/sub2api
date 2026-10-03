@@ -45,6 +45,11 @@ type UpstreamModelMetadataSnapshot struct {
 	Source   string                           `json:"source"`
 	SyncedAt string                           `json:"synced_at"`
 	Models   map[string]UpstreamModelMetadata `json:"models"`
+	// DisplayNames holds the display names an upstream supplied for models whose
+	// capability metadata never became complete. It is deliberately separate
+	// from Models so that learning a model's name can never be mistaken for
+	// learning what the model can do.
+	DisplayNames map[string]string `json:"display_names,omitempty"`
 }
 
 type UpstreamModelCatalog struct {
@@ -113,7 +118,8 @@ func (a *Account) GetUpstreamModelMetadataSnapshot() *UpstreamModelMetadataSnaps
 		return nil
 	}
 	var snapshot UpstreamModelMetadataSnapshot
-	if err := json.Unmarshal(body, &snapshot); err != nil || len(snapshot.Models) == 0 {
+	if err := json.Unmarshal(body, &snapshot); err != nil ||
+		(len(snapshot.Models) == 0 && len(snapshot.DisplayNames) == 0) {
 		return nil
 	}
 	return &snapshot
@@ -126,6 +132,42 @@ func (a *Account) GetUpstreamModelMetadata(modelID string) (UpstreamModelMetadat
 	}
 	metadata, ok := snapshot.Models[strings.TrimSpace(modelID)]
 	return metadata, ok
+}
+
+// UpstreamModelDisplayName returns the display name worth rendering for modelID.
+// A complete capability entry is authoritative; the separate display-name
+// channel covers providers that only publish id/display_name. An upstream that
+// merely restates the model ID adds nothing over Sub2API's own catalog name, so
+// that case reports no label and the caller keeps the built-in prettified name.
+func (a *Account) UpstreamModelDisplayName(modelID string) (string, bool) {
+	snapshot := a.GetUpstreamModelMetadataSnapshot()
+	if snapshot == nil {
+		return "", false
+	}
+	modelID = strings.TrimSpace(modelID)
+	if metadata, ok := snapshot.Models[modelID]; ok {
+		if displayName, ok := upstreamDisplayNameBeyondID(metadata.DisplayName, modelID); ok {
+			return displayName, true
+		}
+	}
+	return upstreamDisplayNameBeyondID(snapshot.DisplayNames[modelID], modelID)
+}
+
+// upstreamDisplayNameBeyondID reports whether displayName says more than any of
+// the model IDs it could be describing. Providers routinely echo a model ID back
+// as its own display name; adopting that would replace a readable catalog name
+// with a raw slug, so callers use this to keep the built-in prettified name.
+func upstreamDisplayNameBeyondID(displayName string, modelIDs ...string) (string, bool) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return "", false
+	}
+	for _, modelID := range modelIDs {
+		if strings.EqualFold(displayName, strings.TrimSpace(modelID)) {
+			return "", false
+		}
+	}
+	return displayName, true
 }
 
 // UpstreamModelSyncErrorKind classifies model sync failures for safe HTTP mapping.
@@ -262,10 +304,11 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 	}
 
 	completeMetadata := completeUpstreamModelMetadataSubset(capabilityIDs, catalog.Metadata)
+	previous := account.GetUpstreamModelMetadataSnapshot()
 	persistedCapabilities := false
 	if len(completeMetadata) > 0 && account != nil && account.ID > 0 && s.accountRepo != nil {
 		// Retain known metadata only for models still listed or explicitly mapped.
-		if previous := account.GetUpstreamModelMetadataSnapshot(); previous != nil {
+		if previous != nil {
 			retainedModels := capabilityIDs
 			if !liveListAvailable {
 				retainedModels = append([]string(nil), capabilityIDs...)
@@ -290,15 +333,34 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			}
 		}
 		snapshot := UpstreamModelMetadataSnapshot{
-			Source:   source,
-			SyncedAt: time.Now().UTC().Format(time.RFC3339),
-			Models:   completeMetadata,
+			Source:       source,
+			SyncedAt:     time.Now().UTC().Format(time.RFC3339),
+			Models:       completeMetadata,
+			DisplayNames: upstreamDisplayNamesToPersist(capabilityIDs, catalog.Metadata, completeMetadata, previous, liveListAvailable),
 		}
 		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
 			return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
 		}
 		account.SetUpstreamModelMetadataSnapshot(snapshot)
 		persistedCapabilities = true
+	} else if account != nil && account.ID > 0 && s.accountRepo != nil {
+		// No capability record was learned this round. A provider that publishes
+		// only id/display_name still gets to name its models, but such a partial
+		// response must never replace an existing capability snapshot.
+		if previous == nil || len(previous.Models) == 0 {
+			displayNames := upstreamDisplayNamesToPersist(capabilityIDs, catalog.Metadata, nil, previous, liveListAvailable)
+			if len(displayNames) > 0 {
+				snapshot := UpstreamModelMetadataSnapshot{
+					Source:       source,
+					SyncedAt:     time.Now().UTC().Format(time.RFC3339),
+					DisplayNames: displayNames,
+				}
+				if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
+					return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
+				}
+				account.SetUpstreamModelMetadataSnapshot(snapshot)
+			}
+		}
 	}
 
 	if upstreamCatalogNeedsRegistry(capabilityIDs, catalog.Metadata) {
@@ -438,6 +500,80 @@ func completeUpstreamModelMetadataSubset(
 		return nil
 	}
 	return complete
+}
+
+// upstreamDisplayNamesToPersist collects the display names worth remembering for
+// models that have no complete capability record. A provider that only publishes
+// id/display_name in its /models response still gets to name its models, and the
+// name is stored apart from the capability snapshot so that knowing a model's
+// name can never be mistaken for knowing what the model can do.
+//
+// Names already carried by a complete record are omitted here: those records stay
+// the single source of truth. When the live list is unavailable the previous name
+// channel is kept as-is, because the sync report's model set is then only the
+// configured mapping targets.
+func upstreamDisplayNamesToPersist(
+	modelIDs []string,
+	metadata map[string]UpstreamModelMetadata,
+	complete map[string]UpstreamModelMetadata,
+	previous *UpstreamModelMetadataSnapshot,
+	liveListAvailable bool,
+) map[string]string {
+	var known map[string]string
+	if previous != nil {
+		known = previous.DisplayNames
+	}
+	if !liveListAvailable {
+		return displayNamesWithoutComplete(known, complete)
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	displayNames := make(map[string]string)
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			continue
+		}
+		if _, completed := complete[modelID]; completed {
+			continue
+		}
+		entry, ok := metadata[modelID]
+		if !ok {
+			continue
+		}
+		displayName, ok := upstreamDisplayNameBeyondID(entry.DisplayName, modelID)
+		if !ok {
+			continue
+		}
+		displayNames[modelID] = displayName
+	}
+	if len(displayNames) == 0 {
+		return nil
+	}
+	return displayNames
+}
+
+// displayNamesWithoutComplete drops name-only entries that now have a complete
+// capability record, so a model never carries two competing labels.
+func displayNamesWithoutComplete(
+	displayNames map[string]string,
+	complete map[string]UpstreamModelMetadata,
+) map[string]string {
+	if len(displayNames) == 0 {
+		return nil
+	}
+	filtered := make(map[string]string, len(displayNames))
+	for modelID, displayName := range displayNames {
+		if _, completed := complete[modelID]; completed {
+			continue
+		}
+		filtered[modelID] = displayName
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func mergeUpstreamModelMetadata(primary, fallback UpstreamModelMetadata) (UpstreamModelMetadata, bool) {

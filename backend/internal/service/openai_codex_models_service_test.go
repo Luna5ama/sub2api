@@ -4087,3 +4087,99 @@ func TestGPT61SolAPIKeyCatalogUsesFullResponses(t *testing.T) {
 	require.Equal(t, false, catalog.Models[0]["use_responses_lite"])
 	require.Equal(t, "low", catalog.Models[0]["default_reasoning_level"])
 }
+
+// Scenario: a downstream instance maps a public alias onto an upstream model,
+// and the upstream (which is itself a Sub2API hop) supplies its own label. The
+// alias must keep routing the request without discarding that label, because a
+// name is not a capability and must survive the hop.
+func TestConfiguredCodexModelDescriptorKeepsUpstreamNameAcrossAlias(t *testing.T) {
+	t.Parallel()
+
+	body, err := buildCodexModelsManifestWithDisplayNames(
+		[]string{"my-coder"},
+		nil,
+		nil,
+		map[string]string{"my-coder": "glm-5.3"},
+		map[string]codexModelMetadataOverride{
+			"my-coder": {UpstreamModelMetadata: UpstreamModelMetadata{
+				ID: "glm-5.3", DisplayName: "GLM 5.3 (Command Code)",
+			}},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	require.Equal(t, "my-coder", models[0]["slug"])
+	require.Equal(t, "GLM 5.3 (Command Code)", models[0]["display_name"],
+		"the upstream label survives the alias hop")
+}
+
+// Scenario: the upstream only echoes the target model id. That adds nothing over
+// the operator's alias, so the alias name is retained instead.
+func TestConfiguredCodexModelDescriptorFallsBackToAliasWhenUpstreamEchoesTargetID(t *testing.T) {
+	t.Parallel()
+
+	for _, displayName := range []string{"", "glm-5.3"} {
+		body, err := buildCodexModelsManifestWithDisplayNames(
+			[]string{"my-coder"},
+			nil,
+			nil,
+			map[string]string{"my-coder": "glm-5.3"},
+			map[string]codexModelMetadataOverride{
+				"my-coder": {UpstreamModelMetadata: UpstreamModelMetadata{
+					ID: "glm-5.3", DisplayName: displayName,
+				}},
+			},
+			nil,
+		)
+		require.NoError(t, err)
+		models := decodeCodexManifestModels(t, body)
+		require.Len(t, models, 1)
+		require.Equal(t, "my-coder", models[0]["display_name"],
+			"display name %q must fall back to the alias", displayName)
+	}
+}
+
+// Scenario: a local per-account override still outranks anything the upstream
+// advertised, so an operator can always force the rendered label.
+func TestConfiguredCodexModelDescriptorLetsLocalOverrideBeatUpstreamName(t *testing.T) {
+	t.Parallel()
+
+	body, err := buildCodexModelsManifestWithDisplayNames(
+		[]string{"my-coder"},
+		nil,
+		nil,
+		map[string]string{"my-coder": "glm-5.3"},
+		map[string]codexModelMetadataOverride{
+			"my-coder": {UpstreamModelMetadata: UpstreamModelMetadata{
+				ID: "glm-5.3", DisplayName: "GLM 5.3 (Command Code)",
+			}},
+		},
+		map[string]string{"my-coder": "Deepseek v4.1 Flash"},
+	)
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	require.Equal(t, "Deepseek v4.1 Flash", models[0]["display_name"])
+}
+
+// Scenario: the API-key manifest path maps a public alias onto an upstream
+// target whose synced snapshot shows no capability record but does carry a name
+// from the separate display-name channel.
+func TestCompleteAPIKeyCodexModelsManifestForClientAppliesNameOnlySnapshot(t *testing.T) {
+	t.Parallel()
+
+	svc := &OpenAIGatewayService{}
+	account := newCodexModelsAPIKeyTestAccount("https://upstream.example/v1")
+	account.Credentials["model_mapping"] = map[string]any{"my-coder": "glm-5.3"}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+	manifest := &OpenAIModelsResponse{Body: []byte(`{"models":[{"slug":"my-coder"}]}`)}
+
+	require.NoError(t, svc.CompleteAPIKeyCodexModelsManifestForClient(manifest, account))
+	models := decodeCodexManifestModels(t, manifest.Body)
+	require.Len(t, models, 1)
+	require.Equal(t, "GLM 5.3 (Command Code)", models[0]["display_name"])
+}
