@@ -149,6 +149,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		setOpenAIResponsesClientToolMapping(c, mapping)
 	}
 
+	// tools + text.format 同时出现时，桥接型上游不会强制执行 schema 约束（见
+	// openai_responses_json_schema_compat.go）。这里把 schema 补进 instructions，
+	// 让结构化输出在这些上游仍然成立。
+	if reinforcedBody, reinforced, reinforceErr := reinforceOpenAIResponsesJSONSchemaInstructions(account, body); reinforceErr != nil {
+		return nil, fmt.Errorf("reinforce Responses JSON schema instructions: %w", reinforceErr)
+	} else if reinforced {
+		body = reinforcedBody
+		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Reinforced Responses JSON schema instructions for bridged upstream (account: %s)", account.Name)
+	}
+
 	originalBody := body
 	rememberOpenCodeInboundBody(c, originalBody)
 	requestView := newOpenAIRequestView(body)

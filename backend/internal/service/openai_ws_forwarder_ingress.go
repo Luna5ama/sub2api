@@ -338,6 +338,16 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			normalized = litePayload
 		}
+		// Same structured-output gap as the HTTP path (see
+		// openai_responses_json_schema_compat.go): upstreams that ignore
+		// text.format once tools are declared need the schema restated in
+		// instructions, otherwise schema-bound clients such as Codex thread
+		// titles receive prose instead of JSON.
+		if reinforced, reinforcedChanged, reinforceErr := reinforceOpenAIResponsesJSONSchemaInstructions(account, normalized); reinforceErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", reinforceErr)
+		} else if reinforcedChanged {
+			normalized = reinforced
+		}
 		apiKey := getAPIKeyFromContext(c)
 		imageGenerationAllowed := GroupAllowsImageGeneration(apiKeyGroup(apiKey))
 		codexImageGenerationExplicitToolPolicy := codexImageGenerationExplicitToolPolicyAllow
