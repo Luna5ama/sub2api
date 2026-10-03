@@ -2307,6 +2307,39 @@ func TestCompleteAPIKeyCodexModelsManifestForClientAddsReasoningEffortOverrideFo
 	require.Equal(t, []string{"low", "medium", "high"}, effortsFromManifestModel(t, models[0]))
 }
 
+// Scenario: the Command Code fallback also reaches the manifest the Codex
+// client fetches for an API-key account, not only the standalone builder.
+func TestCompleteAPIKeyCodexModelsManifestForClientUsesCommandCodeReasoningLevels(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://relay.example/v1",
+		},
+	}
+	svc := &OpenAIGatewayService{}
+	manifest := &OpenAIModelsResponse{Body: []byte(`{"models":[{"slug":"zai-org/GLM-5.3"},{"slug":"company-coding-model"}]}`)}
+
+	require.NoError(t, svc.CompleteAPIKeyCodexModelsManifestForClient(manifest, account))
+
+	models := decodeCodexManifestModels(t, manifest.Body)
+	require.Len(t, models, 2)
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[model["slug"].(string)] = model
+	}
+
+	glm := bySlug["zai-org/GLM-5.3"]
+	require.Equal(t, "high", glm["default_reasoning_level"])
+	require.Equal(t, []string{"low", "high", "max"}, effortsFromManifestModel(t, glm))
+
+	unknown := bySlug["company-coding-model"]
+	require.Equal(t, "none", unknown["default_reasoning_level"])
+	require.Equal(t, []string{"none"}, effortsFromManifestModel(t, unknown))
+}
+
 func TestConvertOpenAIModelListToCodexManifestUsesCompleteDescriptors(t *testing.T) {
 	upstreamBody := `{"object":"list","data":[{"id":"gpt-5.5","object":"model"}]}`
 

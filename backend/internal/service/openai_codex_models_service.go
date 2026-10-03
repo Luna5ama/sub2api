@@ -574,6 +574,18 @@ func newConfiguredCodexModelDescriptor(modelID string) configuredCodexModelDescr
 		descriptor.Slug = modelID
 		descriptor.officialMetadata = openai.CodexGPT61SolMetadata
 	}
+	// Command Code's thinking registry covers models Sub2API has no family rule
+	// for (GLM, Qwen, Gemini, Kimi, MiniMax, ...). It is applied last and only
+	// while the descriptor still carries the "none"-only placeholder, so it can
+	// never overwrite a scale a family rule already declared; synced upstream
+	// metadata still outranks it later in the manifest pipeline.
+	if hasOnlyDefaultCodexReasoningPlaceholder(descriptor.SupportedReasoningLevels) {
+		if levels := commandCodeCodexReasoningLevelsForModel(modelID); len(levels) > 0 {
+			defaultReasoningLevel := commandCodeCodexDefaultReasoningLevel(levels)
+			descriptor.DefaultReasoningLevel = &defaultReasoningLevel
+			descriptor.SupportedReasoningLevels = levels
+		}
+	}
 	return descriptor
 }
 
