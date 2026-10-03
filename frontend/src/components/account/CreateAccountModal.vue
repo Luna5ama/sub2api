@@ -2366,7 +2366,10 @@
 
       <!-- OpenAI OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
       <div
-        v-if="(form.platform === 'openai' || form.platform === 'grok') && isOAuthFlow"
+        v-if="
+          (form.platform === 'openai' || form.platform === 'grok' || form.platform === 'anthropic') &&
+          isOAuthFlow
+        "
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
@@ -6108,6 +6111,14 @@ const createAccountAndFinish = async (
       delete credentials.model_mapping
     }
   }
+  if (platform === 'anthropic' && (type === 'oauth' || type === 'setup-token')) {
+    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    if (modelMapping) {
+      credentials.model_mapping = modelMapping
+    } else {
+      delete credentials.model_mapping
+    }
+  }
   await doCreateAccount({
     name: form.name,
     notes: form.notes,
@@ -7207,6 +7218,16 @@ const handleCookieAuth = async (sessionKey: string) => {
 
         const credentials: Record<string, unknown> = { ...tokenInfo }
         applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
+        if (form.platform === 'anthropic' && (addMethod.value === 'oauth' || addMethod.value === 'setup-token')) {
+          const modelMapping = buildModelMappingObject(
+            modelRestrictionMode.value,
+            allowedModels.value,
+            modelMappings.value
+          )
+          if (modelMapping) {
+            credentials.model_mapping = modelMapping
+          }
+        }
         if (tempUnschedEnabled.value) {
           credentials.temp_unschedulable_enabled = true
           credentials.temp_unschedulable_rules = tempUnschedPayload

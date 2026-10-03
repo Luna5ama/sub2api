@@ -760,7 +760,7 @@ func openaiCodexDisplayName(modelID string) string {
 }
 
 func deepSeekCodexDisplayName(modelID string) string {
-	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	switch strings.ToLower(codexProviderQualifiedModelID(modelID)) {
 	case "deepseek-v4-pro", "deepseek-4-pro":
 		return "DeepSeek V4 Pro"
 	case "deepseek-v4-flash", "deepseek-4-flash":
@@ -771,7 +771,7 @@ func deepSeekCodexDisplayName(modelID string) string {
 }
 
 func isDeepSeekCodexModel(modelID string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelID)), "deepseek-")
+	return strings.HasPrefix(strings.ToLower(codexProviderQualifiedModelID(modelID)), "deepseek-")
 }
 
 func isGrokCodexModel(modelID string) bool {

@@ -277,6 +277,13 @@ func TestNewConfiguredCodexModelDescriptorUsesProviderMetadataAndSafeFallback(t 
 	require.True(t, deepSeek.SupportsParallelToolCalls)
 	require.Equal(t, []string{"text"}, deepSeek.InputModalities)
 
+	// Provider-qualified slugs must resolve the same DeepSeek reasoning scale
+	// as the bare id; otherwise the picker only offers "none".
+	deepSeekQualified := newConfiguredCodexModelDescriptor("deepseek/deepseek-v4.1-flash")
+	require.NotNil(t, deepSeekQualified.DefaultReasoningLevel)
+	require.Equal(t, "high", *deepSeekQualified.DefaultReasoningLevel)
+	require.Equal(t, []string{"low", "high", "max"}, effortsFromConfiguredCodexLevels(deepSeekQualified.SupportedReasoningLevels))
+
 	grok := newConfiguredCodexModelDescriptor("grok-4.6")
 	require.Equal(t, "Grok 4.6", grok.DisplayName)
 	require.Equal(t, int64(500_000), grok.ContextWindow)
