@@ -2967,7 +2967,7 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	// Handle Claude/Anthropic accounts
 	// OAuth/Setup-Token 账号未配置限制时返回默认模型；配置了
 	// model_mapping（模型限制）时复用下方既有的映射模型返回逻辑。
-	if account.IsOAuth() && len(account.GetModelMapping()) == 0 {
+	if account.IsOAuth() && (account.Platform != service.PlatformAnthropic || len(account.GetModelMapping()) == 0) {
 		response.Success(c, claude.DefaultModels)
 		return
 	}
