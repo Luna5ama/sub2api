@@ -184,6 +184,23 @@ func NormalizeModelDisplayNameCredentials(credentials map[string]any) error {
 // Accounts are inspected in ascending id order so the result is deterministic
 // when several accounts define the same model id; the lowest account id wins.
 func ModelDisplayNamesFromAccounts(accounts []Account) map[string]string {
+	return modelDisplayNamesFromAccounts(accounts, false)
+}
+
+// ModelDisplayNamesFromAccountsWithUpstream also adopts the display names each
+// account learned from its own upstream, which is what carries a label across
+// instance hops. Both sources are merged together so a single deterministic
+// lowest-account-id rule resolves every conflict.
+//
+// Precedence per model id is therefore:
+//  1. the local per-account "model_display_names" override
+//  2. the name the account's upstream advertised for that model
+//  3. Sub2API's built-in catalog label (applied by the caller)
+func ModelDisplayNamesFromAccountsWithUpstream(accounts []Account) map[string]string {
+	return modelDisplayNamesFromAccounts(accounts, true)
+}
+
+func modelDisplayNamesFromAccounts(accounts []Account, includeUpstream bool) map[string]string {
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -194,14 +211,29 @@ func ModelDisplayNamesFromAccounts(accounts []Account) map[string]string {
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 
 	var merged map[string]string
+	adopt := func(modelID, displayName string) {
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		if _, exists := merged[modelID]; !exists {
+			merged[modelID] = displayName
+		}
+	}
+
+	// Pass 1: every operator-written override outranks every inferred upstream
+	// name, even when the account carrying the inferred name has a lower id.
 	for _, account := range ordered {
 		for modelID, displayName := range account.GetModelDisplayNames() {
-			if merged == nil {
-				merged = make(map[string]string)
-			}
-			if _, exists := merged[modelID]; !exists {
-				merged[modelID] = displayName
-			}
+			adopt(modelID, displayName)
+		}
+	}
+	if !includeUpstream {
+		return merged
+	}
+	// Pass 2: fill the remaining ids with names learned from upstreams.
+	for _, account := range ordered {
+		for modelID, displayName := range account.UpstreamModelDisplayNames() {
+			adopt(modelID, displayName)
 		}
 	}
 	return merged

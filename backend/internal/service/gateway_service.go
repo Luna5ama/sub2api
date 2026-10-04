@@ -1499,7 +1499,10 @@ func (s *GatewayService) GetModelDisplayNameOverrides(ctx context.Context, group
 	if err != nil || len(accounts) == 0 {
 		return nil
 	}
-	if platform != "" {
+	// A Composite group is served by concrete-platform accounts, so filtering by
+	// the literal "composite" value would discard every account and with it every
+	// label. The composite catalogue merges all of them, so keep them all.
+	if platform != "" && platform != PlatformComposite {
 		filtered := make([]Account, 0, len(accounts))
 		for _, acc := range accounts {
 			if acc.Platform == platform || mixedListingAccountAllowed(platform, &acc) {
@@ -1508,7 +1511,7 @@ func (s *GatewayService) GetModelDisplayNameOverrides(ctx context.Context, group
 		}
 		accounts = filtered
 	}
-	return ModelDisplayNamesFromAccounts(accounts)
+	return ModelDisplayNamesFromAccountsWithUpstream(accounts)
 }
 
 func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, groupID int64, model string) (CompositeModelOwnership, error) {

@@ -243,8 +243,9 @@ func (s *OpenAIGatewayService) groupConfiguredCodexModelIDs(ctx context.Context,
 }
 
 // groupModelDisplayNameOverrides merges per-account display-name overrides for
-// the group's schedulable accounts. A load error yields no overrides so the
-// manifest still renders with the provider-default labels.
+// the group's schedulable accounts, including the names those accounts learned
+// from their own upstreams so a label survives a hop. A load error yields no
+// overrides so the manifest still renders with the provider-default labels.
 func (s *OpenAIGatewayService) groupModelDisplayNameOverrides(ctx context.Context, group *Group) map[string]string {
 	if s == nil || s.accountRepo == nil || group == nil {
 		return nil
@@ -253,7 +254,7 @@ func (s *OpenAIGatewayService) groupModelDisplayNameOverrides(ctx context.Contex
 	if err != nil {
 		return nil
 	}
-	return ModelDisplayNamesFromAccounts(accounts)
+	return ModelDisplayNamesFromAccountsWithUpstream(accounts)
 }
 
 // loadCodexGroupCatalogAccounts separates picker membership from capability

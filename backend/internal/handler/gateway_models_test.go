@@ -1830,3 +1830,94 @@ func TestGatewayModels_CompositeCodexRouteLookupErrorKeepsFallback(t *testing.T)
 		})
 	}
 }
+
+// Scenario: a Composite group is served by concrete-platform accounts, so the
+// per-account override must still reach the catalogue. Filtering the override
+// lookup by the literal "composite" platform used to drop every account and with
+// it every label.
+func TestGatewayModels_CompositeRendersAccountDisplayNameOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(301)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {{
+				ID:          1,
+				Platform:    service.PlatformOpenAI,
+				Status:      service.StatusActive,
+				Schedulable: true,
+				Credentials: map[string]any{
+					"model_mapping":       map[string]any{"glm-5.3": "glm-5.3"},
+					"model_display_names": map[string]any{"glm-5.3": "GLM 5.3 (Command Code)"},
+				},
+			}},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformComposite},
+	})
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, "GLM 5.3 (Command Code)", displayNameForModelIDForTest(t, rec.Body.Bytes(), "glm-5.3"))
+}
+
+// Scenario: the plain /v1/models catalogue is what a downstream instance syncs
+// from. A name this instance learned from its own upstream must be re-published
+// there, otherwise a label set on US stops at the first hop.
+func TestGatewayModels_RepublishesSyncedUpstreamDisplayName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(302)
+	account := service.Account{
+		ID:          1,
+		Platform:    service.PlatformOpenAI,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"glm-5.3": "glm-5.3"},
+		},
+	}
+	account.SetUpstreamModelMetadataSnapshot(service.UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{groupID: {account}},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI},
+	})
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "GLM 5.3 (Command Code)", displayNameForModelIDForTest(t, rec.Body.Bytes(), "glm-5.3"))
+}
+
+func displayNameForModelIDForTest(t *testing.T, body []byte, modelID string) string {
+	t.Helper()
+
+	var envelope struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	for _, entry := range envelope.Data {
+		if entry.ID == modelID {
+			return entry.DisplayName
+		}
+	}
+	t.Fatalf("model %q not present in %s", modelID, string(body))
+	return ""
+}

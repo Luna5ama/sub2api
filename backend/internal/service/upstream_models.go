@@ -140,17 +140,81 @@ func (a *Account) GetUpstreamModelMetadata(modelID string) (UpstreamModelMetadat
 // merely restates the model ID adds nothing over Sub2API's own catalog name, so
 // that case reports no label and the caller keeps the built-in prettified name.
 func (a *Account) UpstreamModelDisplayName(modelID string) (string, bool) {
-	snapshot := a.GetUpstreamModelMetadataSnapshot()
+	return upstreamDisplayNameFromSnapshot(a.GetUpstreamModelMetadataSnapshot(), modelID)
+}
+
+// upstreamDisplayNameFromSnapshot resolves one model id against a snapshot. A
+// complete capability entry is authoritative; the separate display-name channel
+// covers providers that only publish id/display_name.
+func upstreamDisplayNameFromSnapshot(snapshot *UpstreamModelMetadataSnapshot, modelID string) (string, bool) {
 	if snapshot == nil {
 		return "", false
 	}
 	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return "", false
+	}
 	if metadata, ok := snapshot.Models[modelID]; ok {
 		if displayName, ok := upstreamDisplayNameBeyondID(metadata.DisplayName, modelID); ok {
 			return displayName, true
 		}
 	}
 	return upstreamDisplayNameBeyondID(snapshot.DisplayNames[modelID], modelID)
+}
+
+// UpstreamModelDisplayNames maps this account's public model ids onto the display
+// names learned from its upstream. A sync stores a name under the upstream id it
+// was advertised for, so a public alias is relabelled through the account's
+// model_mapping; an unmapped account serves upstream ids directly. Names that
+// merely restate the upstream id carry no information over Sub2API's own catalog
+// label and are omitted, keeping this consistent with UpstreamModelDisplayName.
+//
+// This is what lets a label survive a hop: the instance in the middle re-publishes
+// the name it learned instead of dropping it when it builds its own catalogue.
+func (a *Account) UpstreamModelDisplayNames() map[string]string {
+	snapshot := a.GetUpstreamModelMetadataSnapshot()
+	if snapshot == nil || (len(snapshot.Models) == 0 && len(snapshot.DisplayNames) == 0) {
+		return nil
+	}
+
+	var names map[string]string
+	add := func(publicID, upstreamID string) {
+		publicID = strings.TrimSpace(publicID)
+		upstreamID = strings.TrimSpace(upstreamID)
+		if publicID == "" || upstreamID == "" ||
+			strings.Contains(publicID, "*") || strings.Contains(upstreamID, "*") {
+			return
+		}
+		if _, exists := names[publicID]; exists {
+			return
+		}
+		displayName, ok := upstreamDisplayNameFromSnapshot(snapshot, upstreamID)
+		if !ok {
+			return
+		}
+		if names == nil {
+			names = make(map[string]string)
+		}
+		names[publicID] = displayName
+	}
+
+	mapping := a.GetModelMapping()
+	// A passthrough account ignores model_mapping for routing, so a stale mapping
+	// must not decide how its upstream names are keyed.
+	if len(mapping) == 0 || a.IsOpenAIPassthroughEnabled() {
+		// Without a mapping the account serves upstream ids as public ids.
+		for upstreamID := range snapshot.Models {
+			add(upstreamID, upstreamID)
+		}
+		for upstreamID := range snapshot.DisplayNames {
+			add(upstreamID, upstreamID)
+		}
+		return names
+	}
+	for publicID, upstreamID := range mapping {
+		add(publicID, upstreamID)
+	}
+	return names
 }
 
 // upstreamDisplayNameBeyondID reports whether displayName says more than any of

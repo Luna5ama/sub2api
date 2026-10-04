@@ -91,6 +91,105 @@ func TestModelDisplayNamesFromAccountsPrefersLowestID(t *testing.T) {
 	require.Equal(t, map[string]string{"m1": "from-2", "m2": "only-2"}, ModelDisplayNamesFromAccounts(accounts))
 }
 
+// Scenario: the middle hop of US -> LA -> local relays the label LA learned from
+// US. Mapping the upstream id onto the public alias is what lets the name travel
+// with the alias a downstream instance actually requests.
+func TestUpstreamModelDisplayNamesFollowModelMapping(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		ID:       1,
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"my-coder":       "glm-5.3",
+				"echo-alias":     "name-echoes-id",
+				"unmapped-alias": "unknown-upstream",
+			},
+		},
+	}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{
+			"glm-5.3":        "GLM 5.3 (Command Code)",
+			"name-echoes-id": "name-echoes-id",
+		},
+	})
+
+	require.Equal(t, map[string]string{"my-coder": "GLM 5.3 (Command Code)"}, account.UpstreamModelDisplayNames(),
+		"only names richer than the upstream id survive, and only for mapped public ids")
+}
+
+// Scenario: without a model_mapping the account serves upstream ids directly, so
+// the snapped names are keyed by the upstream ids themselves.
+func TestUpstreamModelDisplayNamesWithoutMappingUseUpstreamIDs(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{ID: 1, Platform: PlatformOpenAI}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		Models: map[string]UpstreamModelMetadata{
+			"glm-5.3": {ID: "glm-5.3", DisplayName: "GLM 5.3 (Command Code)"},
+		},
+	})
+
+	require.Equal(t, map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"}, account.UpstreamModelDisplayNames())
+}
+
+// Scenario: passthrough accounts ignore model_mapping when routing, so a stale
+// mapping must not relabel their upstream names onto public ids either.
+func TestUpstreamModelDisplayNamesIgnoreStaleMappingWhenPassthrough(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		ID:       1,
+		Platform: PlatformOpenAI,
+		Extra:    map[string]any{"openai_passthrough": true},
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"stale-alias": "glm-5.3"},
+		},
+	}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+
+	require.Equal(t, map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"}, account.UpstreamModelDisplayNames())
+}
+
+// Scenario: an operator's local override outranks an upstream-learned name and
+// does so even when the account carrying the upstream name has a lower id, which
+// is the documented precedence for the whole catalogue.
+func TestModelDisplayNamesFromAccountsWithUpstreamLetsLocalOverrideWin(t *testing.T) {
+	t.Parallel()
+
+	localOverride := &Account{
+		ID: 5,
+		Credentials: map[string]any{
+			"model_display_names": map[string]any{"glm-5.3": "Operator Label"},
+		},
+	}
+	upstreamNamed := &Account{ID: 2}
+	upstreamNamed.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+
+	merged := ModelDisplayNamesFromAccountsWithUpstream([]Account{*localOverride, *upstreamNamed})
+	require.Equal(t, map[string]string{"glm-5.3": "Operator Label"}, merged)
+
+	// The upstream name still fills ids no operator labelled.
+	upstreamOnly := &Account{ID: 1, Credentials: map[string]any{"model_mapping": map[string]any{"other": "glm-5.4"}}}
+	upstreamOnly.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.4": "GLM 5.4 (Command Code)"},
+	})
+	merged = ModelDisplayNamesFromAccountsWithUpstream([]Account{*localOverride, *upstreamOnly})
+	require.Equal(t, map[string]string{
+		"glm-5.3": "Operator Label",
+		"other":   "GLM 5.4 (Command Code)",
+	}, merged)
+
+	// Opting out of the upstream channel keeps the original local-only behaviour.
+	require.Equal(t, map[string]string{"glm-5.3": "Operator Label"},
+		ModelDisplayNamesFromAccounts([]Account{*localOverride, *upstreamOnly}))
+}
+
 func TestRewriteModelDisplayNamesHandlesCodexAndOpenAIEnvelopes(t *testing.T) {
 	t.Run("codex models envelope keyed by slug", func(t *testing.T) {
 		body := []byte(`{"models":[{"slug":"deepseek-v4.1-flash","display_name":"deepseek-v4.1-flash"},{"slug":"other","display_name":"other"}]}`)
