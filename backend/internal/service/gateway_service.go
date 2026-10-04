@@ -1453,6 +1453,19 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 			modelSet[model] = struct{}{}
 			hasAnyMapping = true
 		}
+		// A relay account may have no model_mapping at all, or a wildcard rule
+		// that names no concrete public id. The catalogue it synced from its
+		// upstream is still what it can serve, so it has to be listed here or a
+		// downstream instance can never discover those models.
+		for _, model := range acc.UpstreamModelPublicIDs() {
+			// Same platform scope as the mapping keys above: a mixed-scheduling
+			// account only advertises what the listing platform can request.
+			if platform != "" && acc.Platform != platform && !mixedListingModelAllowed(platform, model) {
+				continue
+			}
+			modelSet[model] = struct{}{}
+			hasAnyMapping = true
+		}
 	}
 
 	// If no account has model_mapping, return nil (use default)

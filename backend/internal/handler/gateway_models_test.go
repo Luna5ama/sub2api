@@ -1921,3 +1921,84 @@ func displayNameForModelIDForTest(t *testing.T, body []byte, modelID string) str
 	t.Fatalf("model %q not present in %s", modelID, string(body))
 	return ""
 }
+
+// Scenario: the most common way to chain two instances is a relay account with
+// no model_mapping at all. Only the catalogue it synced from its upstream tells
+// this instance what that upstream serves, so it has to be advertised.
+func TestGatewayModels_UnmappedRelayAdvertisesSyncedCatalogue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, platform := range []string{service.PlatformOpenAI, service.PlatformComposite} {
+		t.Run(platform, func(t *testing.T) {
+			groupID := int64(303)
+			account := service.Account{
+				ID:          1,
+				Platform:    service.PlatformOpenAI,
+				Status:      service.StatusActive,
+				Schedulable: true,
+				Credentials: map[string]any{"api_key": "la-key", "base_url": "https://us.example/v1"},
+			}
+			account.SetUpstreamModelMetadataSnapshot(service.UpstreamModelMetadataSnapshot{
+				DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+			})
+			h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+				byGroup: map[int64][]service.Account{groupID: {account}},
+			})
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+				Group: &service.Group{ID: groupID, Platform: platform},
+			})
+			h.Models(c)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var got gatewayModelsResponseForTest
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			require.Contains(t, modelIDsForTest(got.Data), "glm-5.3")
+			require.Equal(t, "GLM 5.3 (Command Code)",
+				displayNameForModelIDForTest(t, rec.Body.Bytes(), "glm-5.3"))
+		})
+	}
+}
+
+// Scenario: a wildcard model_mapping has no enumerable public keys, so the
+// synced label used to be skipped outright and never reached the catalogue.
+func TestGatewayModels_WildcardMappingRelaysSyncedDisplayName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(304)
+	account := service.Account{
+		ID:          1,
+		Platform:    service.PlatformOpenAI,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"api_key":       "la-key",
+			"base_url":      "https://us.example/v1",
+			"model_mapping": map[string]any{"glm-*": "glm-5.3"},
+		},
+	}
+	account.SetUpstreamModelMetadataSnapshot(service.UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{groupID: {account}},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI},
+	})
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Contains(t, modelIDsForTest(got.Data), "glm-5.3")
+	require.Equal(t, "GLM 5.3 (Command Code)",
+		displayNameForModelIDForTest(t, rec.Body.Bytes(), "glm-5.3"))
+}

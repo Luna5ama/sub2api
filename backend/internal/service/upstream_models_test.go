@@ -1374,3 +1374,128 @@ func TestProjectAccountModelsBodyTreatsUpstreamNameByAudience(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"data":[{"id":"my-coder","display_name":"my-coder"}]}`, string(picker))
 }
+
+func syncedCatalogueAccount(t *testing.T, accountType string, mapping map[string]any) *Account {
+	t.Helper()
+
+	account := &Account{
+		ID:          7,
+		Platform:    PlatformOpenAI,
+		Type:        accountType,
+		Credentials: map[string]any{"api_key": "key", "base_url": "https://us.example/v1"},
+	}
+	if mapping != nil {
+		account.Credentials["model_mapping"] = mapping
+	}
+	account.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+	return account
+}
+
+// Scenario: an upstream relay account is a Base URL + API key account, so the
+// admin sync button has to accept it. Rejecting "upstream" made the very account
+// type used to chain two instances the one that could never learn a catalogue.
+func TestBuildOpenAIAPIKeyModelsRequestAcceptsUpstreamRelayAccounts(t *testing.T) {
+	t.Parallel()
+
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	for _, accountType := range []string{AccountTypeAPIKey, AccountTypeUpstream} {
+		req, err := svc.buildUpstreamModelsRequest(context.Background(), &Account{
+			Platform: PlatformOpenAI,
+			Type:     accountType,
+			Credentials: map[string]any{
+				"api_key":  "relay-key",
+				"base_url": "https://us.example/v1",
+			},
+		})
+		require.NoError(t, err, "account type %q must support upstream model sync", accountType)
+		require.Equal(t, "https://us.example/v1/models", req.URL.String())
+		require.Equal(t, "Bearer relay-key", req.Header.Get("Authorization"))
+	}
+
+	// The CN providers keep the narrower API-key-only contract.
+	_, err := svc.buildUpstreamModelsRequest(context.Background(), &Account{
+		Platform:    PlatformZhipu,
+		Type:        AccountTypeUpstream,
+		Credentials: map[string]any{"api_key": "key", "base_url": "https://open.bigmodel.cn/api/paas/v4"},
+	})
+	var syncErr *UpstreamModelSyncError
+	require.ErrorAs(t, err, &syncErr)
+	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind)
+}
+
+// Scenario: an unmapped relay account is exactly how a chained instance is
+// usually wired. The catalogue it synced has to be advertised, otherwise the
+// downstream instance can never discover the model or the label at all.
+func TestUpstreamModelPublicIDsExposeSyncedCatalogue(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no mapping", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, nil)
+		require.Equal(t, []string{"glm-5.3"}, account.UpstreamModelPublicIDs())
+		require.Equal(t,
+			map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+			account.UpstreamModelDisplayNames())
+	})
+
+	t.Run("identity mapping", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeUpstream, map[string]any{"glm-5.3": "glm-5.3"})
+		require.Equal(t, []string{"glm-5.3"}, account.UpstreamModelPublicIDs())
+	})
+
+	t.Run("prefix wildcard mapping", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"glm-*": "glm-5.3"})
+		require.Equal(t, []string{"glm-5.3"}, account.UpstreamModelPublicIDs())
+		require.Equal(t,
+			map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+			account.UpstreamModelDisplayNames())
+	})
+
+	t.Run("wildcard mapping that hides unrelated models", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"claude-*": "claude-sonnet-4-5"})
+		require.Empty(t, account.UpstreamModelPublicIDs())
+		require.Empty(t, account.UpstreamModelDisplayNames())
+	})
+
+	t.Run("alias mapping does not duplicate the upstream id", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"my-glm": "glm-5.3"})
+		require.Empty(t, account.UpstreamModelPublicIDs())
+		require.Equal(t,
+			map[string]string{"my-glm": "GLM 5.3 (Command Code)"},
+			account.UpstreamModelDisplayNames())
+	})
+
+	t.Run("wildcard mapping that redirects elsewhere is not advertised verbatim", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"glm-*": "other-model"})
+		require.Empty(t, account.UpstreamModelPublicIDs())
+	})
+
+	t.Run("passthrough ignores a stale mapping", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"glm-5.3": "glm-5.3"})
+		setOpenAIPassthroughForTest(account, true)
+		require.Equal(t, []string{"glm-5.3"}, account.UpstreamModelPublicIDs())
+		require.Equal(t,
+			map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+			account.UpstreamModelDisplayNames())
+	})
+
+	t.Run("passthrough does not invent a label for a stale alias", func(t *testing.T) {
+		account := syncedCatalogueAccount(t, AccountTypeAPIKey, map[string]any{"glm-5.3": "glm-5.3"})
+		setOpenAIPassthroughForTest(account, true)
+		account.Credentials["model_mapping"] = map[string]any{"team-glm": "glm-5.3"}
+		// Passthrough forwards the requested model verbatim, so "team-glm" is not
+		// reachable and must not appear in either the catalogue or the labels.
+		require.Equal(t, []string{"glm-5.3"}, account.UpstreamModelPublicIDs())
+		require.Equal(t,
+			map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+			account.UpstreamModelDisplayNames())
+	})
+}
+
+func setOpenAIPassthroughForTest(account *Account, enabled bool) {
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	account.Extra["openai_passthrough"] = enabled
+}

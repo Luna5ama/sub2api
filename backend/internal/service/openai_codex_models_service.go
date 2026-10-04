@@ -1778,9 +1778,11 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		if authToken == "" && !credAccount.IsOpenAIAgentIdentity() {
 			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_TOKEN_MISSING", "account has no Codex backend access token")
 		}
-	case credAccount.IsOpenAIApiKey():
+	case credAccount.IsOpenAIUpstreamAPIKey():
+		// Upstream relay accounts proxy another Sub2API instance, which serves the
+		// standard /v1/models contract, so they take the API-key branch here.
 		baseURL := strings.TrimSpace(credAccount.GetOpenAIBaseURL())
-		authToken = strings.TrimSpace(credAccount.GetOpenAIApiKey())
+		authToken = strings.TrimSpace(credAccount.GetOpenAIProtocolAPIKey())
 		if authToken == "" {
 			return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_CODEX_MODELS_API_KEY_MISSING", "account has no API key for the Codex models upstream")
 		}
@@ -2296,7 +2298,7 @@ func convertOpenAIModelListToCodexManifestForAccount(body []byte, account *Accou
 // contract immediately before a group-specific API key manifest is returned.
 // The shared upstream cache remains independent from local group policy.
 func (s *OpenAIGatewayService) CompleteAPIKeyCodexModelsManifestForClient(manifest *OpenAIModelsResponse, account *Account) error {
-	if manifest == nil || account == nil || !account.IsOpenAIApiKey() || manifest.NotModified || len(manifest.Body) == 0 {
+	if manifest == nil || account == nil || !account.IsOpenAIUpstreamAPIKey() || manifest.NotModified || len(manifest.Body) == 0 {
 		return nil
 	}
 	body := manifest.Body

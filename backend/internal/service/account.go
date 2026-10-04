@@ -1712,6 +1712,15 @@ func (a *Account) GetOpenAIApiKey() string {
 	return a.GetCredential("api_key")
 }
 
+// IsOpenAIUpstreamAPIKey reports the OpenAI-protocol account types that carry a
+// Base URL plus API key and therefore speak the standard OpenAI /v1/models
+// contract: native API-key accounts and upstream relay accounts. Routing,
+// billing and capability gates keep using IsOpenAIApiKey; this is only for the
+// protocol family shared with the upstream relay path.
+func (a *Account) IsOpenAIUpstreamAPIKey() bool {
+	return a != nil && a.IsOpenAI() && (a.Type == AccountTypeAPIKey || a.Type == AccountTypeUpstream)
+}
+
 // GetOpenAIProtocolAPIKey 返回 OpenAI 协议族 APIKey 账号的密钥。
 // 覆盖 openai 原生账号、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）
 // 以及 OpenCode Go 账号，供转发鉴权、模型列表同步等协议族共用路径使用。
@@ -1725,6 +1734,9 @@ func (a *Account) GetOpenAIProtocolAPIKey() string {
 		if a.Type != AccountTypeAPIKey {
 			return ""
 		}
+		return a.GetCredential("api_key")
+	}
+	if a.IsOpenAIUpstreamAPIKey() {
 		return a.GetCredential("api_key")
 	}
 	return a.GetOpenAIApiKey()

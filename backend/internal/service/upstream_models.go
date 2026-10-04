@@ -199,22 +199,102 @@ func (a *Account) UpstreamModelDisplayNames() map[string]string {
 	}
 
 	mapping := a.GetModelMapping()
-	// A passthrough account ignores model_mapping for routing, so a stale mapping
-	// must not decide how its upstream names are keyed.
+	// A passthrough account forwards the requested model verbatim, so its stale
+	// model_mapping neither renames what it serves nor makes an alias reachable.
 	if len(mapping) == 0 || a.IsOpenAIPassthroughEnabled() {
 		// Without a mapping the account serves upstream ids as public ids.
-		for upstreamID := range snapshot.Models {
-			add(upstreamID, upstreamID)
-		}
-		for upstreamID := range snapshot.DisplayNames {
+		for _, upstreamID := range a.UpstreamModelPublicIDs() {
 			add(upstreamID, upstreamID)
 		}
 		return names
+	}
+	// A wildcard rule such as {"glm-*": "glm-5.3"} has no enumerable public keys,
+	// so the public id is the upstream id the rule resolves to. Without this the
+	// rule was skipped outright and the synced label never reached the catalogue.
+	for _, upstreamID := range a.upstreamServeIDs(false) {
+		add(upstreamID, upstreamID)
 	}
 	for publicID, upstreamID := range mapping {
 		add(publicID, upstreamID)
 	}
 	return names
+}
+
+// UpstreamModelServeIDs returns the model ids this account can actually serve
+// from what it learned about its upstream, after the account's own routing rules.
+// It answers two different questions with one walk:
+//
+//   - the full set of ids to advertise (UpstreamModelPublicIDs), so an instance
+//     whose relay account carries no model_mapping can still list the catalogue
+//     it synced;
+//   - the same set minus explicit aliases (UpstreamModelDisplayNames), so a
+//     label is keyed by the public id a request would actually use.
+//
+// Pass-through accounts forward the requested model verbatim, so a stale mapping
+// never narrows what they serve and never makes one of its aliases reachable.
+func (a *Account) upstreamServeIDs(includeAliasPublicIDs bool) []string {
+	snapshot := a.GetUpstreamModelMetadataSnapshot()
+	if snapshot == nil || (len(snapshot.Models) == 0 && len(snapshot.DisplayNames) == 0) {
+		return nil
+	}
+	upstreamIDs := make([]string, 0, len(snapshot.Models)+len(snapshot.DisplayNames))
+	for upstreamID := range snapshot.Models {
+		upstreamIDs = append(upstreamIDs, upstreamID)
+	}
+	for upstreamID := range snapshot.DisplayNames {
+		upstreamIDs = append(upstreamIDs, upstreamID)
+	}
+	sort.Strings(upstreamIDs)
+
+	mapping := a.GetModelMapping()
+	passthrough := len(mapping) == 0 || a.IsOpenAIPassthroughEnabled()
+	aliasTargets := make(map[string]struct{}, len(mapping))
+	for publicID, target := range mapping {
+		if publicID != "" && !strings.Contains(publicID, "*") {
+			aliasTargets[strings.TrimSpace(target)] = struct{}{}
+		}
+	}
+
+	seen := make(map[string]struct{}, len(upstreamIDs))
+	publicIDs := make([]string, 0, len(upstreamIDs))
+	for _, upstreamID := range upstreamIDs {
+		upstreamID = strings.TrimSpace(upstreamID)
+		if upstreamID == "" || strings.Contains(upstreamID, "*") {
+			continue
+		}
+		if !passthrough {
+			// Only surface the upstream id when the mapping lets a request under
+			// that exact name reach it. A rule pointing elsewhere (an alias, or a
+			// malformed wildcard target) means the operator named it differently.
+			target, matched := a.ResolveMappedModel(upstreamID)
+			if !matched || strings.TrimSpace(target) != upstreamID {
+				continue
+			}
+			if !includeAliasPublicIDs {
+				if _, aliased := aliasTargets[upstreamID]; aliased {
+					continue
+				}
+			}
+		}
+		if _, exists := seen[upstreamID]; exists {
+			continue
+		}
+		seen[upstreamID] = struct{}{}
+		publicIDs = append(publicIDs, upstreamID)
+	}
+	if len(publicIDs) == 0 {
+		return nil
+	}
+	return publicIDs
+}
+
+// UpstreamModelPublicIDs returns the concrete public model ids this account can
+// serve from the catalogue it synced from its upstream. It is what makes a
+// synced catalogue visible on an instance whose relay account has no
+// model_mapping, and it resolves wildcard mapping rules to the concrete ids the
+// upstream advertised instead of advertising the pattern itself.
+func (a *Account) UpstreamModelPublicIDs() []string {
+	return a.upstreamServeIDs(true)
 }
 
 // upstreamDisplayNameBeyondID reports whether displayName says more than any of
@@ -1265,8 +1345,29 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 
 // buildOpenAIAPIKeyModelsRequest is shared by admin discovery and public model
 // listing. Codex content negotiation is intentionally absent from this request.
+//
+// Certified account shapes differ per platform: OpenAI also admits upstream relay
+// accounts (Base URL + API key pointing at another Sub2API instance), while the CN
+// providers and OpenCode Go stay API-key only.
+func openAICompatibleModelsRequestAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	switch {
+	case account.IsOpenAI():
+		return account.IsOpenAIUpstreamAPIKey()
+	case account.IsCNProvider() || account.IsOpenCodeGo():
+		return account.Type == AccountTypeAPIKey
+	default:
+		return false
+	}
+}
+
 func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, validateBaseURL func(string) (string, error)) (*http.Request, error) {
-	if account.Type != AccountTypeAPIKey {
+	// Upstream relay accounts are Base URL + API key accounts too, so they speak
+	// the same standard /v1/models contract. Rejecting them here made the admin
+	// sync button fail on the very account type used to chain two instances.
+	if !openAICompatibleModelsRequestAccount(account) {
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported OpenAI account type for upstream model sync: %s", account.Type), nil,
 		)
