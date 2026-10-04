@@ -326,8 +326,10 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 						entry.CodexToolCapabilities = make(map[string]json.RawMessage)
 					}
 					applyCodexToolCapabilities(entry.CodexToolCapabilities, old.CodexToolCapabilities, false)
+					entry.DisplayName = preferUpstreamDisplayName(modelID, entry.DisplayName, old.DisplayName)
 					completeMetadata[modelID] = entry
 				} else {
+					old.DisplayName = preferUpstreamDisplayName(modelID, catalog.Metadata[modelID].DisplayName, old.DisplayName)
 					completeMetadata[modelID] = old
 				}
 			}
@@ -344,22 +346,25 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		account.SetUpstreamModelMetadataSnapshot(snapshot)
 		persistedCapabilities = true
 	} else if account != nil && account.ID > 0 && s.accountRepo != nil {
-		// No capability record was learned this round. A provider that publishes
-		// only id/display_name still gets to name its models, but such a partial
-		// response must never replace an existing capability snapshot.
-		if previous == nil || len(previous.Models) == 0 {
-			displayNames := upstreamDisplayNamesToPersist(capabilityIDs, catalog.Metadata, nil, previous, liveListAvailable)
-			if len(displayNames) > 0 {
-				snapshot := UpstreamModelMetadataSnapshot{
-					Source:       source,
-					SyncedAt:     time.Now().UTC().Format(time.RFC3339),
-					DisplayNames: displayNames,
-				}
-				if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
-					return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
-				}
-				account.SetUpstreamModelMetadataSnapshot(snapshot)
+		// No capability record was learned this round, but a provider that
+		// publishes only id/display_name still gets to name its models. The
+		// labels are written even when capability records already exist, because
+		// a rename must not depend on capabilities being re-learned. Those
+		// records are carried over rather than discarded, so a response that
+		// says nothing about capabilities can never erase them.
+		retainedModels, renamed := refreshRetainedUpstreamDisplayNames(previous, catalog.Metadata, capabilityIDs, liveListAvailable)
+		displayNames := upstreamDisplayNamesToPersist(capabilityIDs, catalog.Metadata, retainedModels, previous, liveListAvailable)
+		if len(displayNames) > 0 || renamed {
+			snapshot := UpstreamModelMetadataSnapshot{
+				Source:       source,
+				SyncedAt:     time.Now().UTC().Format(time.RFC3339),
+				Models:       retainedModels,
+				DisplayNames: displayNames,
 			}
+			if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
+				return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
+			}
+			account.SetUpstreamModelMetadataSnapshot(snapshot)
 		}
 	}
 
@@ -552,6 +557,58 @@ func upstreamDisplayNamesToPersist(
 		return nil
 	}
 	return displayNames
+}
+
+// refreshRetainedUpstreamDisplayNames carries an earlier capability snapshot
+// forward across a sync round that learned no new capabilities, applying any
+// label that round did supply. Keeping the records stops a name-only response
+// from erasing capability knowledge; applying the label lets a rename land even
+// though the response said nothing about what the model can do. Records are
+// carried only for models still listed or explicitly mapped, so a model the
+// upstream retired cannot linger in the snapshot.
+func refreshRetainedUpstreamDisplayNames(
+	previous *UpstreamModelMetadataSnapshot,
+	metadata map[string]UpstreamModelMetadata,
+	modelIDs []string,
+	liveListAvailable bool,
+) (map[string]UpstreamModelMetadata, bool) {
+	if previous == nil || len(previous.Models) == 0 {
+		return nil, false
+	}
+	retain := make(map[string]struct{}, len(modelIDs))
+	for _, modelID := range modelIDs {
+		retain[strings.TrimSpace(modelID)] = struct{}{}
+	}
+	retained := make(map[string]UpstreamModelMetadata, len(previous.Models))
+	renamed := false
+	for modelID, record := range previous.Models {
+		if _, belongs := retain[modelID]; liveListAvailable && !belongs {
+			continue
+		}
+		if displayName := preferUpstreamDisplayName(modelID, metadata[modelID].DisplayName, record.DisplayName); displayName != record.DisplayName {
+			record.DisplayName = displayName
+			renamed = true
+		}
+		retained[modelID] = record
+	}
+	if len(retained) == 0 {
+		return nil, false
+	}
+	return retained, renamed
+}
+
+// preferUpstreamDisplayName returns the first candidate that says more than the
+// model id, so a fresh label always outranks a stale retained one. Candidates
+// that only restate the id are skipped because adopting them would replace a
+// readable catalog name with a raw slug. When every candidate is empty or an id
+// restatement the result is empty, so callers keep the built-in catalog name.
+func preferUpstreamDisplayName(modelID string, candidates ...string) string {
+	for _, candidate := range candidates {
+		if displayName, ok := upstreamDisplayNameBeyondID(candidate, modelID); ok {
+			return displayName
+		}
+	}
+	return ""
 }
 
 // displayNamesWithoutComplete drops name-only entries that now have a complete

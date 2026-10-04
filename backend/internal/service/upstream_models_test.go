@@ -783,7 +783,7 @@ func TestSyncUpstreamModelCatalogDoesNotPersistPartialMetadataWhenRegistryFails(
 	repo := &upstreamModelMetadataRepoStub{}
 	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
 
-	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), &Account{
+	account := &Account{
 		ID: 96, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
 		Credentials: map[string]any{"api_key": "key", "base_url": "https://provider.example/v1"},
 		Extra: map[string]any{UpstreamModelMetadataExtraKey: map[string]any{
@@ -791,12 +791,23 @@ func TestSyncUpstreamModelCatalogDoesNotPersistPartialMetadataWhenRegistryFails(
 				"reasoning": true, "supported_reasoning_levels": []any{"low", "high"},
 			}},
 		}},
-	})
+	}
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, []string{"partially-described-model"}, catalog.Models)
 	require.Equal(t, "Partial Model", catalog.Metadata["partially-described-model"].DisplayName)
 	require.Equal(t, UpstreamModelMetadataIncompleteCode, catalog.Warnings[0].Code)
-	require.Nil(t, repo.updates, "partial metadata must not replace a more complete persisted snapshot")
+	// The response carries a label but no capabilities, so the incomplete
+	// record must survive exactly as it was. Adopting the label is the point of
+	// the sync; treating it as capability evidence is what must never happen.
+	require.NotNil(t, repo.updates, "a supplied name is worth persisting")
+	snapshot := account.GetUpstreamModelMetadataSnapshot()
+	record := snapshot.Models["partially-described-model"]
+	require.Equal(t, "Partial Model", record.DisplayName)
+	require.True(t, record.Reasoning != nil && *record.Reasoning)
+	require.Equal(t, []string{"low", "high"}, record.SupportedReasoningLevels)
+	require.Zero(t, record.ContextWindow, "a name-only response must not invent capability fields")
+	require.Empty(t, record.InputModalities)
 }
 
 // Scenario: 图片专用模型缺少 context 时，不阻止 agent 模型能力落库，也不误报整批失败。
@@ -1222,8 +1233,9 @@ func TestSyncUpstreamModelCatalogPersistsNameOnlyEntries(t *testing.T) {
 		"a display name that only restates the model id adds nothing")
 }
 
-// Scenario: a name-only upstream response must not replace a snapshot that
-// already holds real capability records.
+// Scenario: a name-only upstream response must not replace the capability
+// records an earlier sync established, but the label it carries still has to
+// land. A rename must not depend on the upstream re-announcing capabilities.
 func TestSyncUpstreamModelCatalogKeepsCapabilitySnapshotWhenOnlyNamesArrive(t *testing.T) {
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		{
@@ -1250,10 +1262,58 @@ func TestSyncUpstreamModelCatalogKeepsCapabilitySnapshotWhenOnlyNamesArrive(t *t
 
 	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
 	require.NoError(t, err)
-	require.Nil(t, repo.updates, "a capability snapshot must not be replaced by names alone")
+	require.NotNil(t, repo.updates, "a supplied name must still be persisted")
 	snapshot := account.GetUpstreamModelMetadataSnapshot()
 	require.Contains(t, snapshot.Models, "gpt-6-astra")
+	require.Equal(t, float64(272000), float64(snapshot.Models["gpt-6-astra"].ContextWindow),
+		"capability knowledge must survive a name-only response")
+	require.Equal(t, "Astra Renamed", snapshot.Models["gpt-6-astra"].DisplayName,
+		"a fresh upstream name must outrank the stale retained label")
 	require.Empty(t, snapshot.DisplayNames)
+}
+
+// Scenario: the upstream renames a model whose capabilities are already known
+// and republishes a full capability record. The new label must win over the one
+// carried forward from the previous snapshot.
+func TestSyncUpstreamModelCatalogAdoptsRenamedModelWithCapabilities(t *testing.T) {
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"data":[{
+				"id":"glm-5.3","display_name":"GLM 5.3 (Command Code)",
+				"reasoning":true,"supported_reasoning_levels":["low","high"],
+				"input_modalities":["text"],"context_window":200000
+			}]}`)),
+		},
+		{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))},
+	}}
+	repo := &upstreamModelMetadataRepoStub{}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+	account := &Account{
+		ID: 99, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "key", "base_url": "https://provider.example/v1"},
+		Extra: map[string]any{UpstreamModelMetadataExtraKey: map[string]any{
+			"source": "upstream", "models": map[string]any{"glm-5.3": map[string]any{
+				"id": "glm-5.3", "display_name": "GLM 5.3",
+				"reasoning": true, "supported_reasoning_levels": []any{"low", "high"},
+				"input_modalities": []any{"text"}, "context_window": float64(200000),
+			}},
+		}},
+	}
+
+	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.NotNil(t, repo.updates)
+	require.Equal(t, "GLM 5.3 (Command Code)", account.GetUpstreamModelMetadataSnapshot().Models["glm-5.3"].DisplayName)
+}
+
+func TestPreferUpstreamDisplayNameSkipsIDRestatement(t *testing.T) {
+	require.Equal(t, "New Name", preferUpstreamDisplayName("glm-5.3", "New Name", "Old Name"))
+	require.Equal(t, "Old Name", preferUpstreamDisplayName("glm-5.3", "glm-5.3", "Old Name"),
+		"an id restatement yields to any real label")
+	require.Equal(t, "GLM 5.3", preferUpstreamDisplayName("glm-5.3", "", "GLM 5.3"))
+	require.Equal(t, "", preferUpstreamDisplayName("glm-5.3", "", "glm-5.3"))
 }
 
 func TestUpstreamModelDisplayNamePrefersCompleteRecordAndSkipsIDRestatement(t *testing.T) {
