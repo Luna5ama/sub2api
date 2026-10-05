@@ -407,6 +407,10 @@ type ResponsesOutput struct {
 	Role    string                 `json:"role,omitempty"`
 	Content []ResponsesContentPart `json:"content,omitempty"`
 	Status  string                 `json:"status,omitempty"`
+	// Codex uses this terminal marker to collapse the completed work log. Only
+	// response.output carries it; streamed output_item events stay phase-unknown
+	// until the terminal answer is known.
+	Phase string `json:"phase,omitempty"`
 
 	// type=reasoning
 	EncryptedContent string             `json:"encrypted_content,omitempty"`

@@ -389,3 +389,63 @@ func TestStream_TerminalOutputReusesStreamedItemIDs(t *testing.T) {
 			"terminal output item %s %s never streamed with that id", item.Type, item.ID)
 	}
 }
+
+// TestStream_TerminalMessageCarriesFinalAnswerPhase guards that the message
+// item in response.completed is tagged phase=final_answer so Codex can
+// collapse the completed work log, while streamed output_item.done events
+// stay phase-unknown so interim messages never read as the final answer.
+func TestStream_TerminalMessageCarriesFinalAnswerPhase(t *testing.T) {
+	events := collectStreamEvents(t, []string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"think"}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"final answer"}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	})
+
+	var messageDone *ResponsesOutput
+	var completed *ResponsesStreamEvent
+	for i := range events {
+		e := &events[i]
+		if e.Type == "response.output_item.done" && e.Item != nil && e.Item.Type == "message" {
+			messageDone = e.Item
+		}
+		if e.Type == "response.completed" {
+			completed = e
+		}
+	}
+	require.NotNil(t, messageDone, "streamed message output_item.done missing")
+	require.Empty(t, messageDone.Phase, "streamed message done must stay phase-unknown")
+
+	require.NotNil(t, completed)
+	require.NotNil(t, completed.Response)
+	var messageItem *ResponsesOutput
+	for i := range completed.Response.Output {
+		if completed.Response.Output[i].Type == "message" {
+			messageItem = &completed.Response.Output[i]
+		}
+	}
+	require.NotNil(t, messageItem, "terminal output missing message item")
+	require.Equal(t, "final_answer", messageItem.Phase)
+}
+
+// TestStream_ToolCallTerminalItemsStayPhaseUnknown guards that interim tool
+// items never carry a terminal phase; a tool-call turn ends before any final
+// message exists, so no completed output item may claim one.
+func TestStream_ToolCallTerminalItemsStayPhaseUnknown(t *testing.T) {
+	events := collectStreamEvents(t, []string{
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"call a tool"}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"exec","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+
+	for _, e := range events {
+		if e.Type == "response.output_item.done" && e.Item != nil {
+			require.Empty(t, e.Item.Phase, "streamed %s done must stay phase-unknown", e.Item.Type)
+		}
+		if e.Type == "response.completed" {
+			require.NotNil(t, e.Response)
+			for _, item := range e.Response.Output {
+				require.Empty(t, item.Phase, "tool-call turn has no terminal message to mark")
+			}
+		}
+	}
+}

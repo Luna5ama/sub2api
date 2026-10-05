@@ -2285,9 +2285,10 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		ordered = append(ordered, responsesStreamOutput{
 			Index: messageIndex,
 			Item: ResponsesOutput{
-				Type: "message",
-				ID:   nonEmpty(state.MessageItemID, generateItemID()),
-				Role: "assistant",
+				Type:  "message",
+				ID:    nonEmpty(state.MessageItemID, generateItemID()),
+				Role:  "assistant",
+				Phase: "final_answer",
 				Content: []ResponsesContentPart{{
 					Type: "output_text",
 					Text: state.Text.String(),
