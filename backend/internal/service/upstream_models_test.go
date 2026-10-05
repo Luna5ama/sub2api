@@ -1414,11 +1414,39 @@ func TestBuildOpenAIAPIKeyModelsRequestAcceptsUpstreamRelayAccounts(t *testing.T
 		require.Equal(t, "Bearer relay-key", req.Header.Get("Authorization"))
 	}
 
-	// The CN providers keep the narrower API-key-only contract.
-	_, err := svc.buildUpstreamModelsRequest(context.Background(), &Account{
-		Platform:    PlatformZhipu,
-		Type:        AccountTypeUpstream,
-		Credentials: map[string]any{"api_key": "key", "base_url": "https://open.bigmodel.cn/api/paas/v4"},
+	// Multi-protocol CN providers admit the same relay shape; DeepSeek is the
+	// exact account type operators use when chaining two sub2api instances.
+	deepseekRelay := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeUpstream,
+		Credentials: map[string]any{
+			"api_key":  "relay-key",
+			"base_url": "https://us.example/v1",
+		},
+	}
+	req, err := svc.buildUpstreamModelsRequest(context.Background(), deepseekRelay)
+	require.NoError(t, err)
+	require.Equal(t, "https://us.example/v1/models", req.URL.String())
+	require.Equal(t, "Bearer relay-key", req.Header.Get("Authorization"))
+
+	deepseekRelay.SetUpstreamModelMetadataSnapshot(UpstreamModelMetadataSnapshot{
+		DisplayNames: map[string]string{"glm-5.3": "GLM 5.3 (Command Code)"},
+	})
+
+	// A synced snapshot lets the account serve its own upstream ids even when
+	// the platform-level local allowlist does not know them.
+	require.True(t, deepseekRelay.UpstreamModelIsServable("glm-5.3"))
+	require.False(t, deepseekRelay.UpstreamModelIsServable("not-in-upstream-catalogue"))
+
+	// The same snapshot satisfies the platform-level model support check.
+	require.True(t, deepseekRelay.IsModelSupported("glm-5.3"))
+	require.False(t, deepseekRelay.IsModelSupported("not-in-upstream-catalogue"))
+
+	// OAuth credentials remain excluded.
+	_, err = svc.buildUpstreamModelsRequest(context.Background(), &Account{
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"api_key": "leak", "base_url": "https://us.example/v1"},
 	})
 	var syncErr *UpstreamModelSyncError
 	require.ErrorAs(t, err, &syncErr)

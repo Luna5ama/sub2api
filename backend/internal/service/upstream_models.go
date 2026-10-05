@@ -297,6 +297,29 @@ func (a *Account) UpstreamModelPublicIDs() []string {
 	return a.upstreamServeIDs(true)
 }
 
+// UpstreamModelIsServable reports whether the account synced a catalogue entry
+// for the mapped target id. CN providers normally use a strict local allowlist,
+// but a synced snapshot is a direct upstream declaration that the id exists and
+// is servable.
+func (a *Account) UpstreamModelIsServable(requestedModel string) bool {
+	if a == nil {
+		return false
+	}
+	snapshot := a.GetUpstreamModelMetadataSnapshot()
+	if snapshot == nil {
+		return false
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return false
+	}
+	target := a.GetMappedModel(requestedModel)
+	if _, ok := snapshot.Models[target]; ok {
+		return true
+	}
+	return snapshot.DisplayNames[target] != ""
+}
+
 // upstreamDisplayNameBeyondID reports whether displayName says more than any of
 // the model IDs it could be describing. Providers routinely echo a model ID back
 // as its own display name; adopting that would replace a readable catalog name
@@ -1346,9 +1369,9 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 // buildOpenAIAPIKeyModelsRequest is shared by admin discovery and public model
 // listing. Codex content negotiation is intentionally absent from this request.
 //
-// Certified account shapes differ per platform: OpenAI also admits upstream relay
-// accounts (Base URL + API key pointing at another Sub2API instance), while the CN
-// providers and OpenCode Go stay API-key only.
+// Certified account shapes differ per platform: OpenAI and multi-protocol CN
+// providers also admit upstream relay accounts (Base URL + API key pointing at
+// another Sub2API instance). OAuth credentials remain excluded.
 func openAICompatibleModelsRequestAccount(account *Account) bool {
 	if account == nil {
 		return false
@@ -1357,7 +1380,7 @@ func openAICompatibleModelsRequestAccount(account *Account) bool {
 	case account.IsOpenAI():
 		return account.IsOpenAIUpstreamAPIKey()
 	case account.IsCNProvider() || account.IsOpenCodeGo():
-		return account.Type == AccountTypeAPIKey
+		return account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream
 	default:
 		return false
 	}

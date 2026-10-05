@@ -550,7 +550,7 @@ func TestGetOpenAIProtocolAPIKey_CNProviders(t *testing.T) {
 	require.Equal(t, "sk-kimi", kimi.GetOpenAIProtocolAPIKey())
 	require.False(t, kimi.IsOpenAIApiKey(), "IsOpenAIApiKey stays openai-only for scheduling gates")
 
-	// 非 APIKey 类型的 CN 账号不返回密钥
+	// 非 APIKey/Upstream 类型的 CN 账号不返回密钥
 	notAPIKey := &Account{
 		Platform:    PlatformDeepseek,
 		Type:        AccountTypeOAuth,
@@ -573,6 +573,14 @@ func TestGetOpenAIProtocolAPIKey_CNProviders(t *testing.T) {
 	}
 	require.Equal(t, "sk-opencode-go", openCodeGo.GetOpenAIProtocolAPIKey())
 	require.False(t, openCodeGo.IsOpenAIApiKey())
+
+	deepseekRelay := &Account{
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeUpstream,
+		Credentials: map[string]any{"api_key": "sk-deepseek-relay"},
+	}
+	require.Equal(t, "sk-deepseek-relay", deepseekRelay.GetOpenAIProtocolAPIKey())
+	require.False(t, deepseekRelay.IsOpenAIApiKey())
 }
 
 // TestBuildUpstreamModelsRequest_CNProviders 验证“同步上游支持的模型”对国产供应商可用：

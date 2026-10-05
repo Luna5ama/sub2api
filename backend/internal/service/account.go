@@ -879,6 +879,9 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 	if a.IsOpenAIPassthroughEnabled() {
 		return true
 	}
+	if a.IsCNProvider() && a.UpstreamModelIsServable(requestedModel) {
+		return true
+	}
 	mapping := a.GetModelMapping()
 	if len(mapping) == 0 {
 		if a.IsOpenAIOAuth() {
@@ -1731,7 +1734,9 @@ func (a *Account) GetOpenAIProtocolAPIKey() string {
 		return ""
 	}
 	if a.IsMultiProtocolAPIKey() {
-		if a.Type != AccountTypeAPIKey {
+		// Base URL + API-key relay accounts are explicit credentials, not OAuth
+		// subscriptions. They need the same key access for /models and forwarding.
+		if a.Type != AccountTypeAPIKey && a.Type != AccountTypeUpstream {
 			return ""
 		}
 		return a.GetCredential("api_key")

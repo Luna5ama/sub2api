@@ -350,6 +350,8 @@ func TestModelDisplayNameRelaysAcrossAccountShapes(t *testing.T) {
 			mapping: map[string]any{"glm-5.3": "glm-5.3"}, publicModel: "glm-5.3"},
 		{name: "deepseek identity mapping", groupPlat: service.PlatformDeepseek, accountPlat: service.PlatformDeepseek, accountType: service.AccountTypeAPIKey,
 			mapping: map[string]any{"glm-5.3": "glm-5.3"}, publicModel: "glm-5.3"},
+		{name: "deepseek upstream relay account", groupPlat: service.PlatformDeepseek, accountPlat: service.PlatformDeepseek, accountType: service.AccountTypeUpstream,
+			publicModel: "glm-5.3"},
 		{name: "composite openai identity mapping", groupPlat: service.PlatformComposite, accountPlat: service.PlatformOpenAI, accountType: service.AccountTypeAPIKey,
 			mapping: map[string]any{"glm-5.3": "glm-5.3"}, publicModel: "glm-5.3"},
 	}
